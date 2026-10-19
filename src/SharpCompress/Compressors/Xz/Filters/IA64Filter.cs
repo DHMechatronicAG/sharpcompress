@@ -6,11 +6,10 @@
 
 using System.IO;
 using SharpCompress.Common;
-using SharpCompress.Compressors.Filters;
 
 namespace SharpCompress.Compressors.Xz.Filters;
 
-public class IA64Filter : BlockFilter
+public partial class IA64Filter : BlockFilter
 {
     public override bool AllowAsLast => false;
 
@@ -44,14 +43,6 @@ public class IA64Filter : BlockFilter
     }
 
     public override void ValidateFilter() { }
-
-    public override int Read(byte[] buffer, int offset, int count)
-    {
-        var bytesRead = BaseStream.Read(buffer, offset, count);
-        BranchExecFilter.IA64Converter(buffer, _ip);
-        _ip += (uint)bytesRead;
-        return bytesRead;
-    }
 
     public override void SetBaseStream(Stream stream) => BaseStream = stream;
 }

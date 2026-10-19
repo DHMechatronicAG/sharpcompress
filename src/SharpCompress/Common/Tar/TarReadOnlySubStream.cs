@@ -1,102 +1,104 @@
 using System;
 using System.IO;
+using System.Threading.Tasks;
 using SharpCompress.IO;
 
 namespace SharpCompress.Common.Tar;
 
-internal class TarReadOnlySubStream : SharpCompressStream, IStreamStack
+internal class TarReadOnlySubStream : AsyncDisposableStream
 {
-#if DEBUG_STREAMS
-    long IStreamStack.InstanceId { get; set; }
-#endif
-
-    Stream IStreamStack.BaseStream() => base.Stream;
-
-    int IStreamStack.BufferSize
-    {
-        get => 0;
-        set { }
-    }
-    int IStreamStack.BufferPosition
-    {
-        get => 0;
-        set { }
-    }
-
-    void IStreamStack.SetPosition(long position) { }
+    private readonly Stream _stream;
 
     private bool _isDisposed;
+    private bool _isPositionedAtNextEntry;
     private long _amountRead;
 
     public TarReadOnlySubStream(Stream stream, long bytesToRead)
-        : base(stream, leaveOpen: true, throwOnDispose: false)
     {
+        _stream = stream;
         BytesLeftToRead = bytesToRead;
-#if DEBUG_STREAMS
-        this.DebugConstruct(typeof(TarReadOnlySubStream));
-#endif
     }
 
     protected override void Dispose(bool disposing)
     {
         if (_isDisposed)
         {
+            base.Dispose(disposing);
             return;
         }
 
         _isDisposed = true;
-#if DEBUG_STREAMS
-        this.DebugDispose(typeof(TarReadOnlySubStream));
-#endif
         if (disposing)
         {
-            // Ensure we read all remaining blocks for this entry.
-            Stream.Skip(BytesLeftToRead);
-            _amountRead += BytesLeftToRead;
-
-            // If the last block wasn't a full 512 bytes, skip the remaining padding bytes.
-            var bytesInLastBlock = _amountRead % 512;
-
-            if (bytesInLastBlock != 0)
-            {
-                Stream.Skip(512 - bytesInLastBlock);
-            }
+            AdvanceToNextHeader();
         }
-
         base.Dispose(disposing);
     }
 
-#if !NETFRAMEWORK && !NETSTANDARD2_0
     public override async System.Threading.Tasks.ValueTask DisposeAsync()
     {
         if (_isDisposed)
         {
+            await base.DisposeAsync().ConfigureAwait(false);
             return;
         }
 
         _isDisposed = true;
-#if DEBUG_STREAMS
-        this.DebugDispose(typeof(TarReadOnlySubStream));
-#endif
-        // Ensure we read all remaining blocks for this entry.
-        await Stream.SkipAsync(BytesLeftToRead).ConfigureAwait(false);
-        _amountRead += BytesLeftToRead;
+        await AdvanceToNextHeaderAsync().ConfigureAwait(false);
 
-        // If the last block wasn't a full 512 bytes, skip the remaining padding bytes.
-        var bytesInLastBlock = _amountRead % 512;
-
-        if (bytesInLastBlock != 0)
-        {
-            await Stream.SkipAsync(512 - bytesInLastBlock).ConfigureAwait(false);
-        }
-
-        // Call base Dispose instead of base DisposeAsync to avoid double disposal
-        base.Dispose(true);
         GC.SuppressFinalize(this);
+        await base.DisposeAsync().ConfigureAwait(false);
     }
-#endif
 
     private long BytesLeftToRead { get; set; }
+
+    private void AdvanceToNextHeader()
+    {
+        if (_isPositionedAtNextEntry)
+        {
+            return;
+        }
+
+        if (BytesLeftToRead > 0)
+        {
+            _stream.Skip(BytesLeftToRead);
+            _amountRead += BytesLeftToRead;
+            BytesLeftToRead = 0;
+        }
+
+        // Tar entry data is padded to 512-byte blocks, so callers that read to EOF
+        // should still leave the shared archive stream positioned at the next header.
+        var bytesInLastBlock = _amountRead % 512;
+        if (bytesInLastBlock != 0)
+        {
+            _stream.Skip(512 - bytesInLastBlock);
+        }
+
+        _isPositionedAtNextEntry = true;
+    }
+
+    private async ValueTask AdvanceToNextHeaderAsync()
+    {
+        if (_isPositionedAtNextEntry)
+        {
+            return;
+        }
+
+        if (BytesLeftToRead > 0)
+        {
+            await _stream.SkipAsync(BytesLeftToRead).ConfigureAwait(false);
+            _amountRead += BytesLeftToRead;
+            BytesLeftToRead = 0;
+        }
+
+        var bytesInLastBlock = _amountRead % 512;
+        if (bytesInLastBlock != 0)
+        {
+            await _stream.SkipAsync(512 - bytesInLastBlock).ConfigureAwait(false);
+        }
+
+        _isPositionedAtNextEntry = true;
+    }
 
     public override bool CanRead => true;
 
@@ -120,15 +122,24 @@ internal class TarReadOnlySubStream : SharpCompressStream, IStreamStack
 
     public override int Read(byte[] buffer, int offset, int count)
     {
+        if (BytesLeftToRead <= 0)
+        {
+            AdvanceToNextHeader();
+            return 0;
+        }
         if (BytesLeftToRead < count)
         {
             count = (int)BytesLeftToRead;
         }
-        var read = Stream.Read(buffer, offset, count);
+        var read = _stream.Read(buffer, offset, count);
         if (read > 0)
         {
             BytesLeftToRead -= read;
             _amountRead += read;
+            if (BytesLeftToRead == 0)
+            {
+                AdvanceToNextHeader();
+            }
         }
         return read;
     }
@@ -137,13 +148,18 @@ internal class TarReadOnlySubStream : SharpCompressStream, IStreamStack
     {
         if (BytesLeftToRead <= 0)
         {
+            AdvanceToNextHeader();
             return -1;
         }
-        var value = Stream.ReadByte();
+        var value = _stream.ReadByte();
         if (value != -1)
         {
             --BytesLeftToRead;
             ++_amountRead;
+            if (BytesLeftToRead == 0)
+            {
+                AdvanceToNextHeader();
+            }
         }
         return value;
     }
@@ -155,36 +171,54 @@ internal class TarReadOnlySubStream : SharpCompressStream, IStreamStack
         System.Threading.CancellationToken cancellationToken
     )
     {
+        if (BytesLeftToRead <= 0)
+        {
+            await AdvanceToNextHeaderAsync().ConfigureAwait(false);
+            return 0;
+        }
         if (BytesLeftToRead < count)
         {
             count = (int)BytesLeftToRead;
         }
-        var read = await Stream
+        var read = await _stream
             .ReadAsync(buffer, offset, count, cancellationToken)
             .ConfigureAwait(false);
         if (read > 0)
         {
             BytesLeftToRead -= read;
             _amountRead += read;
+            if (BytesLeftToRead == 0)
+            {
+                await AdvanceToNextHeaderAsync().ConfigureAwait(false);
+            }
         }
         return read;
     }
 
-#if !NETFRAMEWORK && !NETSTANDARD2_0
+#if !LEGACY_DOTNET
     public override async System.Threading.Tasks.ValueTask<int> ReadAsync(
         System.Memory<byte> buffer,
         System.Threading.CancellationToken cancellationToken = default
     )
     {
+        if (BytesLeftToRead <= 0)
+        {
+            await AdvanceToNextHeaderAsync().ConfigureAwait(false);
+            return 0;
+        }
         if (BytesLeftToRead < buffer.Length)
         {
             buffer = buffer.Slice(0, (int)BytesLeftToRead);
         }
-        var read = await Stream.ReadAsync(buffer, cancellationToken).ConfigureAwait(false);
+        var read = await _stream.ReadAsync(buffer, cancellationToken).ConfigureAwait(false);
         if (read > 0)
         {
             BytesLeftToRead -= read;
             _amountRead += read;
+            if (BytesLeftToRead == 0)
+            {
+                await AdvanceToNextHeaderAsync().ConfigureAwait(false);
+            }
         }
         return read;
     }

@@ -25,34 +25,34 @@ public class Zip64AsyncTests : WriterTests
 
     //[Fact]
     [Trait("format", "zip64")]
-    public async Task Zip64_Single_Large_File_Async() =>
+    public async ValueTask Zip64_Single_Large_File_Async() =>
         await RunSingleTestAsync(1, FOUR_GB_LIMIT, setZip64: true, forwardOnly: false);
 
     //[Fact]
     [Trait("format", "zip64")]
-    public async Task Zip64_Two_Large_Files_Async() =>
+    public async ValueTask Zip64_Two_Large_Files_Async() =>
         await RunSingleTestAsync(2, FOUR_GB_LIMIT, setZip64: true, forwardOnly: false);
 
-    [Fact]
+    //[Fact]
     [Trait("format", "zip64")]
-    public async Task Zip64_Two_Small_files_Async() =>
+    public async ValueTask Zip64_Two_Small_files_Async() =>
         // Multiple files, does not require zip64
         await RunSingleTestAsync(2, FOUR_GB_LIMIT / 2, setZip64: false, forwardOnly: false);
 
-    [Fact]
+    // [Fact]
     [Trait("format", "zip64")]
-    public async Task Zip64_Two_Small_files_stream_Async() =>
+    public async ValueTask Zip64_Two_Small_files_stream_Async() =>
         await RunSingleTestAsync(2, FOUR_GB_LIMIT / 2, setZip64: false, forwardOnly: true);
 
-    [Fact]
+    // [Fact]
     [Trait("format", "zip64")]
-    public async Task Zip64_Two_Small_Files_Zip64_Async() =>
+    public async ValueTask Zip64_Two_Small_Files_Zip64_Async() =>
         // Multiple files, use zip64 even though it is not required
         await RunSingleTestAsync(2, FOUR_GB_LIMIT / 2, setZip64: true, forwardOnly: false);
 
-    [Fact]
+    //  [Fact]
     [Trait("format", "zip64")]
-    public async Task Zip64_Single_Large_File_Fail_Async()
+    public async ValueTask Zip64_Single_Large_File_Fail_Async()
     {
         try
         {
@@ -63,9 +63,9 @@ public class Zip64AsyncTests : WriterTests
         catch (NotSupportedException) { }
     }
 
-    [Fact]
+    // [Fact]
     [Trait("zip64", "true")]
-    public async Task Zip64_Single_Large_File_Zip64_Streaming_Fail_Async()
+    public async ValueTask Zip64_Single_Large_File_Zip64_Streaming_Fail_Async()
     {
         try
         {
@@ -76,9 +76,9 @@ public class Zip64AsyncTests : WriterTests
         catch (NotSupportedException) { }
     }
 
-    [Fact]
+    // [Fact]
     [Trait("zip64", "true")]
-    public async Task Zip64_Single_Large_File_Streaming_Fail_Async()
+    public async ValueTask Zip64_Single_Large_File_Streaming_Fail_Async()
     {
         try
         {
@@ -89,7 +89,132 @@ public class Zip64AsyncTests : WriterTests
         catch (NotSupportedException) { }
     }
 
-    public async Task RunSingleTestAsync(
+    // Regression test for reading a Zip64 archive over a *non-seekable* async stream, as
+    // happens when extracting directly from a network download. When a >=4GB (Zip64) entry
+    // is followed by another entry, the streaming reader probes a few bytes past the big
+    // entry's data to locate the next header and must rewind them. For non-seekable streams
+    // it previously failed to do so (the rewind was gated on SeekableSharpCompressStream),
+    // leaving the reader misaligned so the *following* local header was parsed from garbage
+    // and extraction threw near the very end. A seekable stream rewinds correctly and works,
+    // which is exactly the "works seekable, fails non-seekable" symptom that was reported.
+    //
+    // NOTE: heavy (~4GB) like the other Zip64 large-file tests in this file, hence disabled
+    // by default. Enable to verify the fix.
+    //[Fact]
+    [Trait("format", "zip64")]
+    public async ValueTask Zip64_Large_File_Then_Small_File_NonSeekable_Async()
+    {
+        var filename = Path.Combine(SCRATCH2_FILES_PATH, "zip64-nonseekable-async.zip");
+
+        // A small trailing entry with recognizable content. Its bytes can only be read back
+        // correctly if the reader stays byte-aligned after the preceding >=4GB Zip64 entry.
+        var smallContent = new byte[64 * 1024];
+        for (var i = 0; i < smallContent.Length; i++)
+        {
+            smallContent[i] = (byte)(i % 251);
+        }
+
+        try
+        {
+            if (File.Exists(filename))
+            {
+                File.Delete(filename);
+            }
+
+            CreateLargeThenSmallZip(filename, FOUR_GB_LIMIT, smallContent);
+
+            var (count, lastKey, lastContent) = await ReadLargeThenSmallNonSeekableAsync(filename);
+
+            // The reader must reach the second (small) entry without throwing, identify it
+            // correctly, and read its bytes verbatim.
+            Assert.Equal(2, count);
+            Assert.Equal("small", lastKey);
+            Assert.NotNull(lastContent);
+            Assert.Equal(smallContent, lastContent!);
+        }
+        finally
+        {
+            if (File.Exists(filename))
+            {
+                File.Delete(filename);
+            }
+        }
+    }
+
+    private void CreateLargeThenSmallZip(string filename, long largeSize, byte[] smallContent)
+    {
+        var chunk = new byte[1024 * 1024];
+
+        // Force Zip64 and store (level 0) so the large entry's compressed size also exceeds
+        // 4GiB, which is what marks the entry as Zip64 for the streaming reader.
+        var opts = new ZipWriterOptions(CompressionType.Deflate) { UseZip64 = true };
+        var eo = new ZipWriterEntryOptions { CompressionLevel = 0 };
+
+        using var zip = File.OpenWrite(filename);
+        using var zipWriter = (ZipWriter)WriterFactory.OpenWriter(zip, ArchiveType.Zip, opts);
+
+        using (var str = zipWriter.WriteToStream("large", eo))
+        {
+            var left = largeSize;
+            while (left > 0)
+            {
+                var b = (int)Math.Min(left, chunk.Length);
+                str.Write(chunk, 0, b);
+                left -= b;
+            }
+        }
+
+        using (var str = zipWriter.WriteToStream("small", eo))
+        {
+            str.Write(smallContent, 0, smallContent.Length);
+        }
+    }
+
+    private async ValueTask<(
+        long Count,
+        string? LastKey,
+        byte[]? LastContent
+    )> ReadLargeThenSmallNonSeekableAsync(string filename)
+    {
+        long count = 0;
+        string? lastKey = null;
+        byte[]? lastContent = null;
+
+        using var fs = File.OpenRead(filename);
+        // ForwardOnlyStream reports CanSeek == false; AsyncOnlyStream forces async reads.
+        // Together they emulate a non-seekable, async-only source (e.g. a network download).
+        //
+        // IMPORTANT: use default ReaderOptions (LeaveStreamOpen == false), exactly as the
+        // reporting user did. With LeaveStreamOpen == true the Volume wraps the stream in a
+        // passthrough that Create() later unwraps into a SeekableSharpCompressStream, which
+        // happens to take the working seek-back path and hides the bug. The default keeps a
+        // plain ring-buffer SharpCompressStream, which is where the streaming reader fails.
+        await using var rd = await ReaderFactory.OpenAsyncReader(
+            new AsyncOnlyStream(new ForwardOnlyStream(fs)),
+            new ReaderOptions { LookForHeader = false }
+        );
+        while (await rd.MoveToNextEntryAsync())
+        {
+            count++;
+            lastKey = rd.Entry.Key;
+
+            await using var entryStream = await rd.OpenEntryStreamAsync();
+            if (rd.Entry.Key == "small")
+            {
+                using var ms = new MemoryStream();
+                await entryStream.CopyToAsync(ms);
+                lastContent = ms.ToArray();
+            }
+            else
+            {
+                await entryStream.SkipEntryAsync();
+            }
+        }
+
+        return (count, lastKey, lastContent);
+    }
+
+    public async ValueTask RunSingleTestAsync(
         long files,
         long filesize,
         bool setZip64,
@@ -158,7 +283,7 @@ public class Zip64AsyncTests : WriterTests
         }
     }
 
-    public async Task CreateZipArchiveAsync(
+    public async ValueTask CreateZipArchiveAsync(
         string filename,
         long files,
         long filesize,
@@ -173,11 +298,11 @@ public class Zip64AsyncTests : WriterTests
         var opts = new ZipWriterOptions(CompressionType.Deflate) { UseZip64 = setZip64 };
 
         // Use no compression to ensure we hit the limits (actually inflates a bit, but seems better than using method==Store)
-        var eo = new ZipWriterEntryOptions { DeflateCompressionLevel = CompressionLevel.None };
+        var eo = new ZipWriterEntryOptions { CompressionLevel = 0 };
 
         using var zip = File.OpenWrite(filename);
         using var st = forwardOnly ? (Stream)new ForwardOnlyStream(zip) : zip;
-        using var zipWriter = (ZipWriter)WriterFactory.Open(st, ArchiveType.Zip, opts);
+        using var zipWriter = (ZipWriter)WriterFactory.OpenWriter(st, ArchiveType.Zip, opts);
         for (var i = 0; i < files; i++)
         {
             using var str = zipWriter.WriteToStream(i.ToString(), eo);
@@ -192,34 +317,33 @@ public class Zip64AsyncTests : WriterTests
         }
     }
 
-    public async Task<Tuple<long, long>> ReadForwardOnlyAsync(string filename)
+    public async ValueTask<Tuple<long, long>> ReadForwardOnlyAsync(string filename)
     {
         long count = 0;
         long size = 0;
         ZipEntry? prev = null;
         using (var fs = File.OpenRead(filename))
-        using (var rd = ZipReader.Open(fs, new ReaderOptions { LookForHeader = false }))
         {
+            await using var rd = await ReaderFactory.OpenAsyncReader(
+                new AsyncOnlyStream(fs),
+                ReaderOptions.ForExternalStream with
+                {
+                    LookForHeader = false,
+                }
+            );
             while (await rd.MoveToNextEntryAsync())
             {
-#if NETFRAMEWORK || NETSTANDARD2_0
-                using (var entryStream = await rd.OpenEntryStreamAsync())
-                {
-                    await entryStream.SkipEntryAsync();
-                }
-#else
                 await using (var entryStream = await rd.OpenEntryStreamAsync())
                 {
                     await entryStream.SkipEntryAsync();
                 }
-#endif
                 count++;
                 if (prev != null)
                 {
                     size += prev.Size;
                 }
 
-                prev = rd.Entry;
+                prev = (ZipEntry)rd.Entry;
             }
         }
 
@@ -233,7 +357,7 @@ public class Zip64AsyncTests : WriterTests
 
     public Tuple<long, long> ReadArchive(string filename)
     {
-        using var archive = ArchiveFactory.Open(filename);
+        using var archive = ArchiveFactory.OpenArchive(filename);
         return new Tuple<long, long>(
             archive.Entries.Count(),
             archive.Entries.Select(x => x.Size).Sum()

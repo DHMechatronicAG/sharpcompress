@@ -5,11 +5,19 @@ using System.Buffers;
 using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
+using SharpCompress.Common;
 
 namespace SharpCompress.Compressors.LZMA.LZ;
 
-internal class OutWindow : IDisposable
+internal partial class OutWindow : IDisposable
 {
+    private readonly ArrayPool<byte> _pool;
+
+    public OutWindow()
+        : this(ArrayPool<byte>.Shared) { }
+
+    internal OutWindow(ArrayPool<byte> pool) => _pool = pool;
+
     private byte[] _buffer;
     private int _windowSize;
     private int _pos;
@@ -23,17 +31,55 @@ internal class OutWindow : IDisposable
 
     public long Total => _total;
 
+#if !LEGACY_DOTNET
+    // Fast-path accessors used by the local-variable LZMA decode loop (see
+    // LzmaDecoder.Fast.cs). CodeFast snapshots pos/total/buffer into locals for the whole
+    // decode call instead of going through PutByte/GetByte/CopyBlock (and re-reading the
+    // fields of this object) for every single output byte, mirroring how the reference
+    // 7-Zip C decoder caches dicPos/dic as locals for the duration of one decode call.
+    internal byte[] FastBuffer => _buffer;
+    internal int FastPos
+    {
+        get => _pos;
+        set => _pos = value;
+    }
+    internal long FastTotal
+    {
+        get => _total;
+        set => _total = value;
+    }
+    internal int FastWindowSize => _windowSize;
+    internal long FastLimit => _limit;
+
+    internal void EnsureFastCapacity() => EnsureCapacity(_pos + 1);
+
+    internal void FastFlush() => Flush();
+
+    internal void SetPendingFast(int distance, int len)
+    {
+        _pendingDist = distance;
+        _pendingLen = len;
+    }
+#endif
+
+    internal int BufferCapacity => _buffer?.Length ?? 0;
+
     public void Create(int windowSize)
     {
-        if (_windowSize != windowSize)
+        if (windowSize <= 0)
         {
+            throw new InvalidFormatException($"LZMA: invalid dictionary size {windowSize}");
+        }
+        if (_windowSize != windowSize || _buffer is null)
+        {
+            // Allocate first so failed growth leaves the existing buffer owned by this window.
+            var replacement = _pool.Rent(Math.Min(windowSize, 4096));
             if (_buffer is not null)
             {
-                ArrayPool<byte>.Shared.Return(_buffer);
+                _pool.Return(_buffer);
             }
-            _buffer = ArrayPool<byte>.Shared.Rent(windowSize);
+            _buffer = replacement;
         }
-        _buffer[windowSize - 1] = 0;
         _windowSize = windowSize;
         _pos = 0;
         _streamPos = 0;
@@ -42,15 +88,36 @@ internal class OutWindow : IDisposable
         _limit = 0;
     }
 
-    public void Dispose()
+    private void EnsureCapacity(int required)
     {
-        ReleaseStream();
-        if (_buffer is null)
+        if (required <= _buffer.Length)
         {
             return;
         }
-        ArrayPool<byte>.Shared.Return(_buffer);
-        _buffer = null;
+        // Grow from emitted history, never from the advertised dictionary or output size.
+        var capacity = (int)Math.Min(_windowSize, Math.Max(required, (long)_buffer.Length * 2));
+        var replacement = _pool.Rent(capacity);
+        _buffer.AsSpan(0, _pos).CopyTo(replacement);
+        _pool.Return(_buffer);
+        _buffer = replacement;
+    }
+
+    public void Dispose()
+    {
+        try
+        {
+            ReleaseStream();
+        }
+        finally
+        {
+            var buffer = _buffer;
+            _buffer = null;
+            _stream = null;
+            if (buffer is not null)
+            {
+                _pool.Return(buffer);
+            }
+        }
     }
 
     public void Reset()
@@ -72,7 +139,7 @@ internal class OutWindow : IDisposable
         stream.Position = len - size;
         _total = 0;
         _limit = size;
-        _pos = _windowSize - size;
+        _pos = 0;
         CopyStream(stream, size);
         if (_pos == _windowSize)
         {
@@ -84,12 +151,6 @@ internal class OutWindow : IDisposable
     public void ReleaseStream()
     {
         Flush();
-        _stream = null;
-    }
-
-    public async Task ReleaseStreamAsync(CancellationToken cancellationToken = default)
-    {
-        await FlushAsync(cancellationToken).ConfigureAwait(false);
         _stream = null;
     }
 
@@ -105,27 +166,6 @@ internal class OutWindow : IDisposable
             return;
         }
         _stream.Write(_buffer, _streamPos, size);
-        if (_pos >= _windowSize)
-        {
-            _pos = 0;
-        }
-        _streamPos = _pos;
-    }
-
-    private async Task FlushAsync(CancellationToken cancellationToken = default)
-    {
-        if (_stream is null)
-        {
-            return;
-        }
-        var size = _pos - _streamPos;
-        if (size == 0)
-        {
-            return;
-        }
-        await _stream
-            .WriteAsync(_buffer, _streamPos, size, cancellationToken)
-            .ConfigureAwait(false);
         if (_pos >= _windowSize)
         {
             _pos = 0;
@@ -153,26 +193,6 @@ internal class OutWindow : IDisposable
         _pendingLen = rem;
     }
 
-    public async ValueTask CopyPendingAsync(CancellationToken cancellationToken = default)
-    {
-        if (_pendingLen < 1)
-        {
-            return;
-        }
-        var rem = _pendingLen;
-        var pos = (_pendingDist < _pos ? _pos : _pos + _windowSize) - _pendingDist - 1;
-        while (rem > 0 && HasSpace)
-        {
-            if (pos >= _windowSize)
-            {
-                pos = 0;
-            }
-            await PutByteAsync(_buffer[pos++], cancellationToken).ConfigureAwait(false);
-            rem--;
-        }
-        _pendingLen = rem;
-    }
-
     public void CopyBlock(int distance, int len)
     {
         var rem = len;
@@ -183,6 +203,7 @@ internal class OutWindow : IDisposable
         var fastSize = Math.Min(Math.Min(sizeUntilWindowEnd, sizeUntilOverlap), targetSize);
         if (fastSize >= 2)
         {
+            EnsureCapacity(_pos + fastSize);
             _buffer.AsSpan(pos, fastSize).CopyTo(_buffer.AsSpan(_pos, fastSize));
             _pos += fastSize;
             pos += fastSize;
@@ -206,45 +227,9 @@ internal class OutWindow : IDisposable
         _pendingDist = distance;
     }
 
-    public async ValueTask CopyBlockAsync(
-        int distance,
-        int len,
-        CancellationToken cancellationToken = default
-    )
-    {
-        var rem = len;
-        var pos = (distance < _pos ? _pos : _pos + _windowSize) - distance - 1;
-        var targetSize = HasSpace ? (int)Math.Min(rem, _limit - _total) : 0;
-        var sizeUntilWindowEnd = Math.Min(_windowSize - _pos, _windowSize - pos);
-        var sizeUntilOverlap = Math.Abs(pos - _pos);
-        var fastSize = Math.Min(Math.Min(sizeUntilWindowEnd, sizeUntilOverlap), targetSize);
-        if (fastSize >= 2)
-        {
-            _buffer.AsSpan(pos, fastSize).CopyTo(_buffer.AsSpan(_pos, fastSize));
-            _pos += fastSize;
-            pos += fastSize;
-            _total += fastSize;
-            if (_pos >= _windowSize)
-            {
-                await FlushAsync(cancellationToken).ConfigureAwait(false);
-            }
-            rem -= fastSize;
-        }
-        while (rem > 0 && HasSpace)
-        {
-            if (pos >= _windowSize)
-            {
-                pos = 0;
-            }
-            await PutByteAsync(_buffer[pos++], cancellationToken).ConfigureAwait(false);
-            rem--;
-        }
-        _pendingLen = rem;
-        _pendingDist = distance;
-    }
-
     public void PutByte(byte b)
     {
+        EnsureCapacity(_pos + 1);
         _buffer[_pos++] = b;
         _total++;
         if (_pos >= _windowSize)
@@ -253,18 +238,13 @@ internal class OutWindow : IDisposable
         }
     }
 
-    public async ValueTask PutByteAsync(byte b, CancellationToken cancellationToken = default)
-    {
-        _buffer[_pos++] = b;
-        _total++;
-        if (_pos >= _windowSize)
-        {
-            await FlushAsync(cancellationToken).ConfigureAwait(false);
-        }
-    }
-
     public byte GetByte(int distance)
     {
+        // The initial literal context is zero; no dictionary history has been emitted yet.
+        if (_total == 0 && distance == 0)
+        {
+            return 0;
+        }
         var pos = _pos - distance - 1;
         if (pos < 0)
         {
@@ -278,7 +258,7 @@ internal class OutWindow : IDisposable
         var size = len;
         while (size > 0 && _pos < _windowSize && _total < _limit)
         {
-            var curSize = _windowSize - _pos;
+            var curSize = Math.Min(4096, _windowSize - _pos);
             if (curSize > _limit - _total)
             {
                 curSize = (int)(_limit - _total);
@@ -287,6 +267,7 @@ internal class OutWindow : IDisposable
             {
                 curSize = size;
             }
+            EnsureCapacity(_pos + curSize);
             var numReadBytes = stream.Read(_buffer, _pos, curSize);
             if (numReadBytes == 0)
             {
@@ -298,44 +279,6 @@ internal class OutWindow : IDisposable
             if (_pos >= _windowSize)
             {
                 Flush();
-            }
-        }
-        return len - size;
-    }
-
-    public async Task<int> CopyStreamAsync(
-        Stream stream,
-        int len,
-        CancellationToken cancellationToken = default
-    )
-    {
-        var size = len;
-        while (size > 0 && _pos < _windowSize && _total < _limit)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-
-            var curSize = _windowSize - _pos;
-            if (curSize > _limit - _total)
-            {
-                curSize = (int)(_limit - _total);
-            }
-            if (curSize > size)
-            {
-                curSize = size;
-            }
-            var numReadBytes = await stream
-                .ReadAsync(_buffer, _pos, curSize, cancellationToken)
-                .ConfigureAwait(false);
-            if (numReadBytes == 0)
-            {
-                throw new DataErrorException();
-            }
-            size -= numReadBytes;
-            _pos += numReadBytes;
-            _total += numReadBytes;
-            if (_pos >= _windowSize)
-            {
-                await FlushAsync(cancellationToken).ConfigureAwait(false);
             }
         }
         return len - size;

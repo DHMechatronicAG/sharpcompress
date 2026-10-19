@@ -3,6 +3,7 @@ using System.IO;
 using System.Linq;
 using SharpCompress.Archives.Tar;
 using SharpCompress.Common;
+using SharpCompress.Writers.Tar;
 using Xunit;
 
 namespace SharpCompress.Test.Tar;
@@ -12,7 +13,7 @@ public class TarArchiveDirectoryTests : TestBase
     [Fact]
     public void TarArchive_AddDirectoryEntry_CreatesDirectoryEntry()
     {
-        using var archive = TarArchive.Create();
+        using var archive = TarArchive.CreateArchive();
 
         archive.AddDirectoryEntry("test-dir", DateTime.Now);
 
@@ -25,7 +26,7 @@ public class TarArchiveDirectoryTests : TestBase
     [Fact]
     public void TarArchive_AddDirectoryEntry_MultipleDirectories()
     {
-        using var archive = TarArchive.Create();
+        using var archive = TarArchive.CreateArchive();
 
         archive.AddDirectoryEntry("dir1", DateTime.Now);
         archive.AddDirectoryEntry("dir2", DateTime.Now);
@@ -39,7 +40,7 @@ public class TarArchiveDirectoryTests : TestBase
     [Fact]
     public void TarArchive_AddDirectoryEntry_MixedWithFiles()
     {
-        using var archive = TarArchive.Create();
+        using var archive = TarArchive.CreateArchive();
 
         archive.AddDirectoryEntry("dir1", DateTime.Now);
 
@@ -62,7 +63,7 @@ public class TarArchiveDirectoryTests : TestBase
     {
         var scratchPath = Path.Combine(SCRATCH_FILES_PATH, "tar-directory-test.tar");
 
-        using (var archive = TarArchive.Create())
+        using (var archive = TarArchive.CreateArchive())
         {
             archive.AddDirectoryEntry("dir1", DateTime.Now);
             archive.AddDirectoryEntry("dir2", DateTime.Now);
@@ -80,11 +81,11 @@ public class TarArchiveDirectoryTests : TestBase
 
             using (var fileStream = File.Create(scratchPath))
             {
-                archive.SaveTo(fileStream, CompressionType.None);
+                archive.SaveTo(fileStream, new TarWriterOptions(CompressionType.None, true));
             }
         }
 
-        using (var archive = TarArchive.Open(scratchPath))
+        using (var archive = TarArchive.OpenArchive(scratchPath))
         {
             var entries = archive.Entries.OrderBy(e => e.Key).ToList();
             Assert.Equal(3, entries.Count);
@@ -103,7 +104,7 @@ public class TarArchiveDirectoryTests : TestBase
     [Fact]
     public void TarArchive_AddDirectoryEntry_DuplicateKey_ThrowsException()
     {
-        using var archive = TarArchive.Create();
+        using var archive = TarArchive.CreateArchive();
 
         archive.AddDirectoryEntry("test-dir", DateTime.Now);
 

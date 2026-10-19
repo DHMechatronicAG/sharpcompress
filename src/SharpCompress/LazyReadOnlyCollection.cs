@@ -1,5 +1,3 @@
-﻿#nullable disable
-
 using System;
 using System.Collections;
 using System.Collections.Generic;
@@ -8,24 +6,24 @@ namespace SharpCompress;
 
 internal sealed class LazyReadOnlyCollection<T> : ICollection<T>
 {
-    private readonly List<T> backing = new();
-    private readonly IEnumerator<T> source;
-    private bool fullyLoaded;
+    private readonly List<T> _backing = new();
+    private readonly IEnumerator<T> _source;
+    private bool _fullyLoaded;
 
-    public LazyReadOnlyCollection(IEnumerable<T> source) => this.source = source.GetEnumerator();
+    public LazyReadOnlyCollection(IEnumerable<T> source) => _source = source.GetEnumerator();
 
     private class LazyLoader : IEnumerator<T>
     {
-        private readonly LazyReadOnlyCollection<T> lazyReadOnlyCollection;
-        private bool disposed;
-        private int index = -1;
+        private readonly LazyReadOnlyCollection<T> _lazyReadOnlyCollection;
+        private bool _disposed;
+        private int _index = -1;
 
         internal LazyLoader(LazyReadOnlyCollection<T> lazyReadOnlyCollection) =>
-            this.lazyReadOnlyCollection = lazyReadOnlyCollection;
+            _lazyReadOnlyCollection = lazyReadOnlyCollection;
 
         #region IEnumerator<T> Members
 
-        public T Current => lazyReadOnlyCollection.backing[index];
+        public T Current => _lazyReadOnlyCollection._backing[_index];
 
         #endregion
 
@@ -33,9 +31,9 @@ internal sealed class LazyReadOnlyCollection<T> : ICollection<T>
 
         public void Dispose()
         {
-            if (!disposed)
+            if (!_disposed)
             {
-                disposed = true;
+                _disposed = true;
             }
         }
 
@@ -43,22 +41,22 @@ internal sealed class LazyReadOnlyCollection<T> : ICollection<T>
 
         #region IEnumerator Members
 
-        object IEnumerator.Current => Current;
+        object IEnumerator.Current => Current!;
 
         public bool MoveNext()
         {
-            if (index + 1 < lazyReadOnlyCollection.backing.Count)
+            if (_index + 1 < _lazyReadOnlyCollection._backing.Count)
             {
-                index++;
+                _index++;
                 return true;
             }
-            if (!lazyReadOnlyCollection.fullyLoaded && lazyReadOnlyCollection.source.MoveNext())
+            if (!_lazyReadOnlyCollection._fullyLoaded && _lazyReadOnlyCollection._source.MoveNext())
             {
-                lazyReadOnlyCollection.backing.Add(lazyReadOnlyCollection.source.Current);
-                index++;
+                _lazyReadOnlyCollection._backing.Add(_lazyReadOnlyCollection._source.Current);
+                _index++;
                 return true;
             }
-            lazyReadOnlyCollection.fullyLoaded = true;
+            _lazyReadOnlyCollection._fullyLoaded = true;
             return false;
         }
 
@@ -69,14 +67,14 @@ internal sealed class LazyReadOnlyCollection<T> : ICollection<T>
 
     internal void EnsureFullyLoaded()
     {
-        if (!fullyLoaded)
+        if (!_fullyLoaded)
         {
             this.ForEach(x => { });
-            fullyLoaded = true;
+            _fullyLoaded = true;
         }
     }
 
-    internal IEnumerable<T> GetLoaded() => backing;
+    internal IEnumerable<T> GetLoaded() => _backing;
 
     #region ICollection<T> Members
 
@@ -87,13 +85,13 @@ internal sealed class LazyReadOnlyCollection<T> : ICollection<T>
     public bool Contains(T item)
     {
         EnsureFullyLoaded();
-        return backing.Contains(item);
+        return _backing.Contains(item);
     }
 
     public void CopyTo(T[] array, int arrayIndex)
     {
         EnsureFullyLoaded();
-        backing.CopyTo(array, arrayIndex);
+        _backing.CopyTo(array, arrayIndex);
     }
 
     public int Count
@@ -101,7 +99,7 @@ internal sealed class LazyReadOnlyCollection<T> : ICollection<T>
         get
         {
             EnsureFullyLoaded();
-            return backing.Count;
+            return _backing.Count;
         }
     }
 

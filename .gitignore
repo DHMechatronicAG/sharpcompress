@@ -4,8 +4,8 @@ _ReSharper.SharpCompress/
 bin/
 *.suo
 *.user
-TestArchives/Scratch/
-TestArchives/Scratch2/
+tests/TestArchives/Scratch/
+tests/TestArchives/Scratch2/
 TestResults/
 *.nupkg
 packages/*/
@@ -17,6 +17,11 @@ tests/TestArchives/*/Scratch2
 tools
 .idea/
 artifacts/
+BenchmarkDotNet.Artifacts/
+baseline-artifacts/
+profiler-snapshots/
 
 .DS_Store
 *.snupkg
+benchmark-results/
+.opencode/

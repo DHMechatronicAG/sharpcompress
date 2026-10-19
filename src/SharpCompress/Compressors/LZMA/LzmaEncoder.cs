@@ -1,14 +1,17 @@
 #nullable disable
 
 using System;
+using System.Buffers;
 using System.IO;
+using System.Threading;
+using System.Threading.Tasks;
 using SharpCompress.Common;
 using SharpCompress.Compressors.LZMA.LZ;
 using SharpCompress.Compressors.LZMA.RangeCoder;
 
 namespace SharpCompress.Compressors.LZMA;
 
-internal class Encoder : ICoder, ISetCoderProperties, IWriteCoderProperties
+internal partial class Encoder : ICoder, ISetCoderProperties, IWriteCoderProperties, IDisposable
 {
     private enum EMatchFinderType
     {
@@ -79,19 +82,24 @@ internal class Encoder : ICoder, ISetCoderProperties, IWriteCoderProperties
     private const int K_DEFAULT_DICTIONARY_LOG_SIZE = 22;
     private const uint K_NUM_FAST_BYTES_DEFAULT = 0x20;
 
-    private class LiteralEncoder
+    private partial class LiteralEncoder
     {
-        public struct Encoder2
+        public partial struct Encoder2
         {
             private BitEncoder[] _encoders;
+            private int _baseIndex;
 
-            public void Create() => _encoders = new BitEncoder[0x300];
+            public void Create(BitEncoder[] encoders, int baseIndex)
+            {
+                _encoders = encoders;
+                _baseIndex = baseIndex;
+            }
 
             public void Init()
             {
                 for (var i = 0; i < 0x300; i++)
                 {
-                    _encoders[i].Init();
+                    _encoders[_baseIndex + i].Init();
                 }
             }
 
@@ -101,7 +109,24 @@ internal class Encoder : ICoder, ISetCoderProperties, IWriteCoderProperties
                 for (var i = 7; i >= 0; i--)
                 {
                     var bit = (uint)((symbol >> i) & 1);
-                    _encoders[context].Encode(rangeEncoder, bit);
+                    _encoders[_baseIndex + context].Encode(rangeEncoder, bit);
+                    context = (context << 1) | bit;
+                }
+            }
+
+            public async ValueTask EncodeAsync(
+                RangeCoder.Encoder rangeEncoder,
+                byte symbol,
+                CancellationToken cancellationToken = default
+            )
+            {
+                uint context = 1;
+                for (var i = 7; i >= 0; i--)
+                {
+                    var bit = (uint)((symbol >> i) & 1);
+                    await _encoders[_baseIndex + context]
+                        .EncodeAsync(rangeEncoder, bit, cancellationToken)
+                        .ConfigureAwait(false);
                     context = (context << 1) | bit;
                 }
             }
@@ -120,7 +145,33 @@ internal class Encoder : ICoder, ISetCoderProperties, IWriteCoderProperties
                         state += ((1 + matchBit) << 8);
                         same = (matchBit == bit);
                     }
-                    _encoders[state].Encode(rangeEncoder, bit);
+                    _encoders[_baseIndex + state].Encode(rangeEncoder, bit);
+                    context = (context << 1) | bit;
+                }
+            }
+
+            public async ValueTask EncodeMatchedAsync(
+                RangeCoder.Encoder rangeEncoder,
+                byte matchByte,
+                byte symbol,
+                CancellationToken cancellationToken = default
+            )
+            {
+                uint context = 1;
+                var same = true;
+                for (var i = 7; i >= 0; i--)
+                {
+                    var bit = (uint)((symbol >> i) & 1);
+                    var state = context;
+                    if (same)
+                    {
+                        var matchBit = (uint)((matchByte >> i) & 1);
+                        state += ((1 + matchBit) << 8);
+                        same = matchBit == bit;
+                    }
+                    await _encoders[_baseIndex + state]
+                        .EncodeAsync(rangeEncoder, bit, cancellationToken)
+                        .ConfigureAwait(false);
                     context = (context << 1) | bit;
                 }
             }
@@ -136,7 +187,8 @@ internal class Encoder : ICoder, ISetCoderProperties, IWriteCoderProperties
                     {
                         var matchBit = (uint)(matchByte >> i) & 1;
                         var bit = (uint)(symbol >> i) & 1;
-                        price += _encoders[((1 + matchBit) << 8) + context].GetPrice(bit);
+                        price += _encoders[_baseIndex + ((1 + matchBit) << 8) + context]
+                            .GetPrice(bit);
                         context = (context << 1) | bit;
                         if (matchBit != bit)
                         {
@@ -148,7 +200,7 @@ internal class Encoder : ICoder, ISetCoderProperties, IWriteCoderProperties
                 for (; i >= 0; i--)
                 {
                     var bit = (uint)(symbol >> i) & 1;
-                    price += _encoders[context].GetPrice(bit);
+                    price += _encoders[_baseIndex + context].GetPrice(bit);
                     context = (context << 1) | bit;
                 }
                 return price;
@@ -156,6 +208,7 @@ internal class Encoder : ICoder, ISetCoderProperties, IWriteCoderProperties
         }
 
         private Encoder2[] _coders;
+        private BitEncoder[] _models;
         private int _numPrevBits;
         private int _numPosBits;
         private uint _posMask;
@@ -170,11 +223,36 @@ internal class Encoder : ICoder, ISetCoderProperties, IWriteCoderProperties
             _posMask = ((uint)1 << numPosBits) - 1;
             _numPrevBits = numPrevBits;
             var numStates = (uint)1 << (_numPrevBits + _numPosBits);
-            _coders = new Encoder2[numStates];
+            var requiredModelLength = checked((int)(numStates * 0x300));
+            if (_models is null || _models.Length < requiredModelLength)
+            {
+                var replacement = ArrayPool<BitEncoder>.Shared.Rent(requiredModelLength);
+                if (_models is not null)
+                {
+                    ArrayPool<BitEncoder>.Shared.Return(_models);
+                }
+                _models = replacement;
+            }
+            if (_coders is null || _coders.Length != numStates)
+            {
+                _coders = new Encoder2[numStates];
+            }
             for (uint i = 0; i < numStates; i++)
             {
-                _coders[i].Create();
+                _coders[i].Create(_models, checked((int)(i * 0x300)));
             }
+        }
+
+        public void Dispose()
+        {
+            if (_models is null)
+            {
+                return;
+            }
+
+            ArrayPool<BitEncoder>.Shared.Return(_models);
+            _models = null;
+            _coders = null;
         }
 
         public void Init()
@@ -190,7 +268,7 @@ internal class Encoder : ICoder, ISetCoderProperties, IWriteCoderProperties
             _coders[((pos & _posMask) << _numPrevBits) + (uint)(prevByte >> (8 - _numPrevBits))];
     }
 
-    private class LenEncoder
+    private partial class LenEncoder
     {
         private BitEncoder _choice = new();
         private BitEncoder _choice2 = new();
@@ -247,6 +325,49 @@ internal class Encoder : ICoder, ISetCoderProperties, IWriteCoderProperties
             }
         }
 
+        public async ValueTask EncodeAsync(
+            RangeCoder.Encoder rangeEncoder,
+            uint symbol,
+            uint posState,
+            CancellationToken cancellationToken = default
+        )
+        {
+            if (symbol < Base.K_NUM_LOW_LEN_SYMBOLS)
+            {
+                await _choice.EncodeAsync(rangeEncoder, 0, cancellationToken).ConfigureAwait(false);
+                await _lowCoder[posState]
+                    .EncodeAsync(rangeEncoder, symbol, cancellationToken)
+                    .ConfigureAwait(false);
+            }
+            else
+            {
+                symbol -= Base.K_NUM_LOW_LEN_SYMBOLS;
+                await _choice.EncodeAsync(rangeEncoder, 1, cancellationToken).ConfigureAwait(false);
+                if (symbol < Base.K_NUM_MID_LEN_SYMBOLS)
+                {
+                    await _choice2
+                        .EncodeAsync(rangeEncoder, 0, cancellationToken)
+                        .ConfigureAwait(false);
+                    await _midCoder[posState]
+                        .EncodeAsync(rangeEncoder, symbol, cancellationToken)
+                        .ConfigureAwait(false);
+                }
+                else
+                {
+                    await _choice2
+                        .EncodeAsync(rangeEncoder, 1, cancellationToken)
+                        .ConfigureAwait(false);
+                    await _highCoder
+                        .EncodeAsync(
+                            rangeEncoder,
+                            symbol - Base.K_NUM_MID_LEN_SYMBOLS,
+                            cancellationToken
+                        )
+                        .ConfigureAwait(false);
+                }
+            }
+        }
+
         public void SetPrices(uint posState, uint numSymbols, uint[] prices, uint st)
         {
             var a0 = _choice.GetPrice0();
@@ -281,10 +402,7 @@ internal class Encoder : ICoder, ISetCoderProperties, IWriteCoderProperties
         }
     }
 
-    private const uint K_NUM_LEN_SPEC_SYMBOLS =
-        Base.K_NUM_LOW_LEN_SYMBOLS + Base.K_NUM_MID_LEN_SYMBOLS;
-
-    private class LenPriceTableEncoder : LenEncoder
+    private partial class LenPriceTableEncoder : LenEncoder
     {
         private readonly uint[] _prices = new uint[
             Base.K_NUM_LEN_SYMBOLS << Base.K_NUM_POS_STATES_BITS_ENCODING_MAX
@@ -319,11 +437,26 @@ internal class Encoder : ICoder, ISetCoderProperties, IWriteCoderProperties
                 UpdateTable(posState);
             }
         }
+
+        public new async ValueTask EncodeAsync(
+            RangeCoder.Encoder rangeEncoder,
+            uint symbol,
+            uint posState,
+            CancellationToken cancellationToken = default
+        )
+        {
+            await base.EncodeAsync(rangeEncoder, symbol, posState, cancellationToken)
+                .ConfigureAwait(false);
+            if (--_counters[posState] == 0)
+            {
+                UpdateTable(posState);
+            }
+        }
     }
 
     private const uint K_NUM_OPTS = 1 << 12;
 
-    private class Optimal
+    private struct Optimal
     {
         public Base.State _state;
 
@@ -464,14 +597,17 @@ internal class Encoder : ICoder, ISetCoderProperties, IWriteCoderProperties
 
     public Encoder()
     {
-        for (var i = 0; i < K_NUM_OPTS; i++)
-        {
-            _optimum[i] = new Optimal();
-        }
         for (var i = 0; i < Base.K_NUM_LEN_TO_POS_STATES; i++)
         {
             _posSlotEncoder[i] = new BitTreeEncoder(Base.K_NUM_POS_SLOT_BITS);
         }
+    }
+
+    public void Dispose()
+    {
+        _literalEncoder.Dispose();
+        _matchFinder?.Dispose();
+        _matchFinder = null;
     }
 
     private void SetWriteEndMarkerMode(bool writeEndMarker) => _writeEndMark = writeEndMarker;
@@ -759,7 +895,7 @@ internal class Encoder : ICoder, ISetCoderProperties, IWriteCoderProperties
             do
             {
                 var curAndLenPrice = price + _repMatchLenEncoder.GetPrice(repLen - 2, posState);
-                var optimum = _optimum[repLen];
+                ref var optimum = ref _optimum[repLen];
                 if (curAndLenPrice < optimum._price)
                 {
                     optimum._price = curAndLenPrice;
@@ -784,7 +920,7 @@ internal class Encoder : ICoder, ISetCoderProperties, IWriteCoderProperties
             {
                 var distance = _matchDistances[offs + 1];
                 var curAndLenPrice = normalMatchPrice + GetPosLenPrice(distance, len, posState);
-                var optimum = _optimum[len];
+                ref var optimum = ref _optimum[len];
                 if (curAndLenPrice < optimum._price)
                 {
                     optimum._price = curAndLenPrice;
@@ -939,7 +1075,7 @@ internal class Encoder : ICoder, ISetCoderProperties, IWriteCoderProperties
                     .GetSubCoder(position, _matchFinder.GetIndexByte(0 - 2))
                     .GetPrice(!state.IsCharState(), matchByte, currentByte);
 
-            var nextOptimum = _optimum[cur + 1];
+            ref var nextOptimum = ref _optimum[cur + 1];
 
             var nextIsChar = false;
             if (curAnd1Price < nextOptimum._price)
@@ -1005,7 +1141,7 @@ internal class Encoder : ICoder, ISetCoderProperties, IWriteCoderProperties
                         }
                         var curAndLenPrice =
                             nextRepMatchPrice + GetRepPrice(0, lenTest2, state2, posStateNext);
-                        var optimum = _optimum[offset];
+                        ref var optimum = ref _optimum[offset];
                         if (curAndLenPrice < optimum._price)
                         {
                             optimum._price = curAndLenPrice;
@@ -1036,7 +1172,7 @@ internal class Encoder : ICoder, ISetCoderProperties, IWriteCoderProperties
                     }
                     var curAndLenPrice =
                         repMatchPrice + GetRepPrice(repIndex, lenTest, state, posState);
-                    var optimum = _optimum[cur + lenTest];
+                    ref var optimum = ref _optimum[cur + lenTest];
                     if (curAndLenPrice < optimum._price)
                     {
                         optimum._price = curAndLenPrice;
@@ -1100,7 +1236,7 @@ internal class Encoder : ICoder, ISetCoderProperties, IWriteCoderProperties
                             }
                             var curAndLenPrice =
                                 nextRepMatchPrice + GetRepPrice(0, lenTest2, state2, posStateNext);
-                            var optimum = _optimum[cur + offset];
+                            ref var optimum = ref _optimum[cur + offset];
                             if (curAndLenPrice < optimum._price)
                             {
                                 optimum._price = curAndLenPrice;
@@ -1149,7 +1285,7 @@ internal class Encoder : ICoder, ISetCoderProperties, IWriteCoderProperties
                     var curBack = _matchDistances[offs + 1];
                     var curAndLenPrice =
                         normalMatchPrice + GetPosLenPrice(curBack, lenTest, posState);
-                    var optimum = _optimum[cur + lenTest];
+                    ref var optimum = ref _optimum[cur + lenTest];
                     if (curAndLenPrice < optimum._price)
                     {
                         optimum._price = curAndLenPrice;
@@ -1208,7 +1344,7 @@ internal class Encoder : ICoder, ISetCoderProperties, IWriteCoderProperties
                                 curAndLenPrice =
                                     nextRepMatchPrice
                                     + GetRepPrice(0, lenTest2, state2, posStateNext);
-                                optimum = _optimum[cur + offset];
+                                optimum = ref _optimum[cur + offset];
                                 if (curAndLenPrice < optimum._price)
                                 {
                                     optimum._price = curAndLenPrice;
@@ -1230,12 +1366,6 @@ internal class Encoder : ICoder, ISetCoderProperties, IWriteCoderProperties
                 }
             }
         }
-    }
-
-    private bool ChangePair(uint smallDist, uint bigDist)
-    {
-        const int kDif = 7;
-        return (smallDist < ((uint)(1) << (32 - kDif)) && bigDist >= (smallDist << kDif));
     }
 
     private void WriteEndMarker(uint posState)
@@ -1263,12 +1393,63 @@ internal class Encoder : ICoder, ISetCoderProperties, IWriteCoderProperties
         _posAlignEncoder.ReverseEncode(_rangeEncoder, posReduced & Base.K_ALIGN_MASK);
     }
 
+    private async ValueTask WriteEndMarkerAsync(
+        uint posState,
+        CancellationToken cancellationToken = default
+    )
+    {
+        if (!_writeEndMark)
+        {
+            return;
+        }
+
+        await _isMatch[(_state._index << Base.K_NUM_POS_STATES_BITS_MAX) + posState]
+            .EncodeAsync(_rangeEncoder, 1, cancellationToken)
+            .ConfigureAwait(false);
+        await _isRep[_state._index]
+            .EncodeAsync(_rangeEncoder, 0, cancellationToken)
+            .ConfigureAwait(false);
+        _state.UpdateMatch();
+        var len = Base.K_MATCH_MIN_LEN;
+        await _lenEncoder
+            .EncodeAsync(_rangeEncoder, len - Base.K_MATCH_MIN_LEN, posState, cancellationToken)
+            .ConfigureAwait(false);
+        uint posSlot = (1 << Base.K_NUM_POS_SLOT_BITS) - 1;
+        var lenToPosState = Base.GetLenToPosState(len);
+        await _posSlotEncoder[lenToPosState]
+            .EncodeAsync(_rangeEncoder, posSlot, cancellationToken)
+            .ConfigureAwait(false);
+        var footerBits = 30;
+        var posReduced = (((uint)1) << footerBits) - 1;
+        await _rangeEncoder
+            .EncodeDirectBitsAsync(
+                posReduced >> Base.K_NUM_ALIGN_BITS,
+                footerBits - Base.K_NUM_ALIGN_BITS,
+                cancellationToken
+            )
+            .ConfigureAwait(false);
+        await _posAlignEncoder
+            .ReverseEncodeAsync(_rangeEncoder, posReduced & Base.K_ALIGN_MASK, cancellationToken)
+            .ConfigureAwait(false);
+    }
+
     private void Flush(uint nowPos)
     {
         ReleaseMfStream();
         WriteEndMarker(nowPos & _posStateMask);
         _rangeEncoder.FlushData();
         _rangeEncoder.FlushStream();
+    }
+
+    private async ValueTask FlushAsync(uint nowPos, CancellationToken cancellationToken = default)
+    {
+        ReleaseMfStream();
+        await WriteEndMarkerAsync(nowPos & _posStateMask, cancellationToken).ConfigureAwait(false);
+        for (var i = 0; i < 5; i++)
+        {
+            await _rangeEncoder.ShiftLowAsync(cancellationToken).ConfigureAwait(false);
+        }
+        await _rangeEncoder.FlushStreamAsync(cancellationToken).ConfigureAwait(false);
     }
 
     public void CodeOneBlock(out long inSize, out long outSize, out bool finished)
@@ -1512,6 +1693,290 @@ internal class Encoder : ICoder, ISetCoderProperties, IWriteCoderProperties
         }
     }
 
+    public async ValueTask<(long inSize, long outSize, bool finished)> CodeOneBlockAsync(
+        CancellationToken cancellationToken = default
+    )
+    {
+        long inSize = 0;
+        long outSize = 0;
+        var finished = true;
+
+        if (_inStream != null)
+        {
+            _matchFinder.SetStream(_inStream);
+            _needReleaseMfStream = true;
+            _inStream = null;
+        }
+
+        if (_finished)
+        {
+            return (inSize, outSize, finished);
+        }
+        _finished = true;
+
+        var progressPosValuePrev = _nowPos64;
+        if (_nowPos64 == 0)
+        {
+            if (_trainSize > 0)
+            {
+                for (
+                    ;
+                    _trainSize > 0 && (!_processingMode || !_matchFinder.IsDataStarved);
+                    _trainSize--
+                )
+                {
+                    _matchFinder.Skip(1);
+                }
+                if (_trainSize == 0)
+                {
+                    _previousByte = _matchFinder.GetIndexByte(-1);
+                }
+            }
+            if (_processingMode && _matchFinder.IsDataStarved)
+            {
+                _finished = false;
+                return (inSize, outSize, finished);
+            }
+            if (_matchFinder.GetNumAvailableBytes() == 0)
+            {
+                await FlushAsync((uint)_nowPos64, cancellationToken).ConfigureAwait(false);
+                return (inSize, outSize, finished);
+            }
+
+            ReadMatchDistances(out var len, out var numDistancePairs);
+            var posState = (uint)_nowPos64 & _posStateMask;
+            await _isMatch[(_state._index << Base.K_NUM_POS_STATES_BITS_MAX) + posState]
+                .EncodeAsync(_rangeEncoder, 0, cancellationToken)
+                .ConfigureAwait(false);
+            _state.UpdateChar();
+            var curByte = _matchFinder.GetIndexByte((int)(0 - _additionalOffset));
+            await _literalEncoder
+                .GetSubCoder((uint)_nowPos64, _previousByte)
+                .EncodeAsync(_rangeEncoder, curByte, cancellationToken)
+                .ConfigureAwait(false);
+            _previousByte = curByte;
+            _additionalOffset--;
+            _nowPos64++;
+        }
+        if (_processingMode && _matchFinder.IsDataStarved)
+        {
+            _finished = false;
+            return (inSize, outSize, finished);
+        }
+        if (_matchFinder.GetNumAvailableBytes() == 0)
+        {
+            await FlushAsync((uint)_nowPos64, cancellationToken).ConfigureAwait(false);
+            return (inSize, outSize, finished);
+        }
+        while (true)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            if (_processingMode && _matchFinder.IsDataStarved)
+            {
+                _finished = false;
+                return (inSize, outSize, finished);
+            }
+
+            var len = GetOptimum((uint)_nowPos64, out var pos);
+
+            var posState = (uint)_nowPos64 & _posStateMask;
+            var complexState = (_state._index << Base.K_NUM_POS_STATES_BITS_MAX) + posState;
+            if (len == 1 && pos == 0xFFFFFFFF)
+            {
+                await _isMatch[complexState]
+                    .EncodeAsync(_rangeEncoder, 0, cancellationToken)
+                    .ConfigureAwait(false);
+                var curByte = _matchFinder.GetIndexByte((int)(0 - _additionalOffset));
+                var subCoder = _literalEncoder.GetSubCoder((uint)_nowPos64, _previousByte);
+                if (!_state.IsCharState())
+                {
+                    var matchByte = _matchFinder.GetIndexByte(
+                        (int)(0 - _repDistances[0] - 1 - _additionalOffset)
+                    );
+                    await subCoder
+                        .EncodeMatchedAsync(_rangeEncoder, matchByte, curByte, cancellationToken)
+                        .ConfigureAwait(false);
+                }
+                else
+                {
+                    await subCoder
+                        .EncodeAsync(_rangeEncoder, curByte, cancellationToken)
+                        .ConfigureAwait(false);
+                }
+                _previousByte = curByte;
+                _state.UpdateChar();
+            }
+            else
+            {
+                await _isMatch[complexState]
+                    .EncodeAsync(_rangeEncoder, 1, cancellationToken)
+                    .ConfigureAwait(false);
+                if (pos < Base.K_NUM_REP_DISTANCES)
+                {
+                    await _isRep[_state._index]
+                        .EncodeAsync(_rangeEncoder, 1, cancellationToken)
+                        .ConfigureAwait(false);
+                    if (pos == 0)
+                    {
+                        await _isRepG0[_state._index]
+                            .EncodeAsync(_rangeEncoder, 0, cancellationToken)
+                            .ConfigureAwait(false);
+                        await _isRep0Long[complexState]
+                            .EncodeAsync(_rangeEncoder, len == 1 ? 0u : 1u, cancellationToken)
+                            .ConfigureAwait(false);
+                    }
+                    else
+                    {
+                        await _isRepG0[_state._index]
+                            .EncodeAsync(_rangeEncoder, 1, cancellationToken)
+                            .ConfigureAwait(false);
+                        if (pos == 1)
+                        {
+                            await _isRepG1[_state._index]
+                                .EncodeAsync(_rangeEncoder, 0, cancellationToken)
+                                .ConfigureAwait(false);
+                        }
+                        else
+                        {
+                            await _isRepG1[_state._index]
+                                .EncodeAsync(_rangeEncoder, 1, cancellationToken)
+                                .ConfigureAwait(false);
+                            await _isRepG2[_state._index]
+                                .EncodeAsync(_rangeEncoder, pos - 2, cancellationToken)
+                                .ConfigureAwait(false);
+                        }
+                    }
+                    if (len == 1)
+                    {
+                        _state.UpdateShortRep();
+                    }
+                    else
+                    {
+                        await _repMatchLenEncoder
+                            .EncodeAsync(
+                                _rangeEncoder,
+                                len - Base.K_MATCH_MIN_LEN,
+                                posState,
+                                cancellationToken
+                            )
+                            .ConfigureAwait(false);
+                        _state.UpdateRep();
+                    }
+                    var distance = _repDistances[pos];
+                    if (pos != 0)
+                    {
+                        for (var i = pos; i >= 1; i--)
+                        {
+                            _repDistances[i] = _repDistances[i - 1];
+                        }
+                        _repDistances[0] = distance;
+                    }
+                }
+                else
+                {
+                    await _isRep[_state._index]
+                        .EncodeAsync(_rangeEncoder, 0, cancellationToken)
+                        .ConfigureAwait(false);
+                    _state.UpdateMatch();
+                    await _lenEncoder
+                        .EncodeAsync(
+                            _rangeEncoder,
+                            len - Base.K_MATCH_MIN_LEN,
+                            posState,
+                            cancellationToken
+                        )
+                        .ConfigureAwait(false);
+                    pos -= Base.K_NUM_REP_DISTANCES;
+                    var posSlot = GetPosSlot(pos);
+                    var lenToPosState = Base.GetLenToPosState(len);
+                    await _posSlotEncoder[lenToPosState]
+                        .EncodeAsync(_rangeEncoder, posSlot, cancellationToken)
+                        .ConfigureAwait(false);
+
+                    if (posSlot >= Base.K_START_POS_MODEL_INDEX)
+                    {
+                        var footerBits = (int)((posSlot >> 1) - 1);
+                        var baseVal = ((2 | (posSlot & 1)) << footerBits);
+                        var posReduced = pos - baseVal;
+
+                        if (posSlot < Base.K_END_POS_MODEL_INDEX)
+                        {
+                            await BitTreeEncoder
+                                .ReverseEncodeAsync(
+                                    _posEncoders,
+                                    baseVal - posSlot - 1,
+                                    _rangeEncoder,
+                                    footerBits,
+                                    posReduced,
+                                    cancellationToken
+                                )
+                                .ConfigureAwait(false);
+                        }
+                        else
+                        {
+                            await _rangeEncoder
+                                .EncodeDirectBitsAsync(
+                                    posReduced >> Base.K_NUM_ALIGN_BITS,
+                                    footerBits - Base.K_NUM_ALIGN_BITS,
+                                    cancellationToken
+                                )
+                                .ConfigureAwait(false);
+                            await _posAlignEncoder
+                                .ReverseEncodeAsync(
+                                    _rangeEncoder,
+                                    posReduced & Base.K_ALIGN_MASK,
+                                    cancellationToken
+                                )
+                                .ConfigureAwait(false);
+                            _alignPriceCount++;
+                        }
+                    }
+                    var distance = pos;
+                    for (var i = Base.K_NUM_REP_DISTANCES - 1; i >= 1; i--)
+                    {
+                        _repDistances[i] = _repDistances[i - 1];
+                    }
+                    _repDistances[0] = distance;
+                    _matchPriceCount++;
+                }
+                _previousByte = _matchFinder.GetIndexByte((int)(len - 1 - _additionalOffset));
+            }
+            _additionalOffset -= len;
+            _nowPos64 += len;
+            if (_additionalOffset == 0)
+            {
+                if (_matchPriceCount >= (1 << 7))
+                {
+                    FillDistancesPrices();
+                }
+                if (_alignPriceCount >= Base.K_ALIGN_TABLE_SIZE)
+                {
+                    FillAlignPrices();
+                }
+                inSize = _nowPos64;
+                outSize = _rangeEncoder.GetProcessedSizeAdd();
+                if (_processingMode && _matchFinder.IsDataStarved)
+                {
+                    _finished = false;
+                    return (inSize, outSize, finished);
+                }
+                if (_matchFinder.GetNumAvailableBytes() == 0)
+                {
+                    await FlushAsync((uint)_nowPos64, cancellationToken).ConfigureAwait(false);
+                    return (inSize, outSize, finished);
+                }
+
+                if (_nowPos64 - progressPosValuePrev >= (1 << 12))
+                {
+                    _finished = false;
+                    finished = false;
+                    return (inSize, outSize, finished);
+                }
+            }
+        }
+    }
+
     private void ReleaseMfStream()
     {
         if (_matchFinder != null && _needReleaseMfStream)
@@ -1592,6 +2057,36 @@ internal class Encoder : ICoder, ISetCoderProperties, IWriteCoderProperties
             while (true)
             {
                 CodeOneBlock(out var processedInSize, out var processedOutSize, out var finished);
+                if (finished)
+                {
+                    return processedInSize;
+                }
+            }
+        }
+        finally
+        {
+            _matchFinder.ReleaseStream();
+            if (final)
+            {
+                ReleaseStreams();
+            }
+        }
+    }
+
+    public async ValueTask<long> CodeAsync(
+        Stream inStream,
+        bool final,
+        CancellationToken cancellationToken = default
+    )
+    {
+        _matchFinder.SetStream(inStream);
+        _processingMode = !final;
+        try
+        {
+            while (true)
+            {
+                var (processedInSize, _, finished) = await CodeOneBlockAsync(cancellationToken)
+                    .ConfigureAwait(false);
                 if (finished)
                 {
                     return processedInSize;

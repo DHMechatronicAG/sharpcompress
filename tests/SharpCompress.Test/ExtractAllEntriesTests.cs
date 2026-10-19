@@ -18,7 +18,7 @@ public class ExtractAllEntriesTests : TestBase
     {
         var archivePath = Path.Combine(TEST_ARCHIVES_PATH, "Zip.deflate.zip");
 
-        using var archive = ArchiveFactory.Open(archivePath);
+        using var archive = ArchiveFactory.OpenArchive(archivePath);
         Assert.Throws<SharpCompressException>(() =>
         {
             using var reader = archive.ExtractAllEntries();
@@ -30,7 +30,7 @@ public class ExtractAllEntriesTests : TestBase
     {
         var archivePath = Path.Combine(TEST_ARCHIVES_PATH, "Rar.solid.rar");
 
-        using var archive = ArchiveFactory.Open(archivePath);
+        using var archive = ArchiveFactory.OpenArchive(archivePath);
         Assert.True(archive.IsSolid);
 
         // Calculate total size like user code does
@@ -43,10 +43,7 @@ public class ExtractAllEntriesTests : TestBase
         {
             if (!reader.Entry.IsDirectory)
             {
-                reader.WriteEntryToDirectory(
-                    SCRATCH_FILES_PATH,
-                    new ExtractionOptions { ExtractFullPath = true, Overwrite = true }
-                );
+                reader.WriteEntryToDirectory(SCRATCH_FILES_PATH);
 
                 completed += reader.Entry.Size;
                 var progress = completed / totalSize;

@@ -18,13 +18,12 @@ public class ExtractAllTests : TestBase
     [InlineData("7Zip.solid.7z")]
     [InlineData("7Zip.nonsolid.7z")]
     [InlineData("7Zip.LZMA.7z")]
-    public async Task ExtractAllEntriesAsync(string archivePath)
+    public async ValueTask ExtractAllEntriesAsync(string archivePath)
     {
         var testArchive = Path.Combine(TEST_ARCHIVES_PATH, archivePath);
-        var options = new ExtractionOptions() { ExtractFullPath = true, Overwrite = true };
 
-        using var archive = ArchiveFactory.Open(testArchive);
-        await archive.WriteToDirectoryAsync(SCRATCH_FILES_PATH, options);
+        await using var archive = await ArchiveFactory.OpenAsyncArchive(testArchive);
+        await archive.WriteToDirectoryAsync(SCRATCH_FILES_PATH);
     }
 
     [Theory]
@@ -38,9 +37,8 @@ public class ExtractAllTests : TestBase
     public void ExtractAllEntriesSync(string archivePath)
     {
         var testArchive = Path.Combine(TEST_ARCHIVES_PATH, archivePath);
-        var options = new ExtractionOptions() { ExtractFullPath = true, Overwrite = true };
 
-        using var archive = ArchiveFactory.Open(testArchive);
-        archive.WriteToDirectory(SCRATCH_FILES_PATH, options);
+        using var archive = ArchiveFactory.OpenArchive(testArchive);
+        archive.WriteToDirectory(SCRATCH_FILES_PATH);
     }
 }

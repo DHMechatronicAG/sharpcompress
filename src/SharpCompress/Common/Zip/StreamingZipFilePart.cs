@@ -1,60 +1,42 @@
 using System.IO;
 using SharpCompress.Common.Zip.Headers;
-using SharpCompress.Compressors.Deflate;
 using SharpCompress.IO;
+using SharpCompress.Providers;
 
 namespace SharpCompress.Common.Zip;
 
-internal sealed class StreamingZipFilePart : ZipFilePart
+internal sealed partial class StreamingZipFilePart : ZipFilePart
 {
     private Stream? _decompressionStream;
 
-    internal StreamingZipFilePart(ZipFileEntry header, Stream stream)
-        : base(header, stream) { }
+    internal StreamingZipFilePart(
+        ZipFileEntry header,
+        Stream stream,
+        CompressionProviderRegistry compressionProviders
+    )
+        : base(header, stream, compressionProviders) { }
 
     protected override Stream CreateBaseStream() => Header.PackedStream.NotNull();
 
-    internal override Stream GetCompressedStream()
-    {
-        if (!Header.HasData)
-        {
-            return Stream.Null;
-        }
-        _decompressionStream = CreateDecompressionStream(
-            GetCryptoStream(CreateBaseStream()),
-            Header.CompressionMethod
-        );
-        if (LeaveStreamOpen)
-        {
-            return SharpCompressStream.Create(_decompressionStream, leaveOpen: true);
-        }
-        return _decompressionStream;
-    }
-
-    internal BinaryReader FixStreamedFileLocation(ref SharpCompressStream rewindableStream)
+    internal BinaryReader FixStreamedFileLocation(ref Stream stream)
     {
         if (Header.IsDirectory)
         {
-            return new BinaryReader(rewindableStream);
+            return new BinaryReader(stream, System.Text.Encoding.Default, leaveOpen: true);
         }
 
         if (Header.HasData && !Skipped)
         {
-            _decompressionStream ??= GetCompressedStream();
+            var decompressionStream = _decompressionStream ??= GetCompressedStream().NotNull();
 
-            _decompressionStream.Skip();
+            decompressionStream.Skip();
 
             // If we had TotalIn / TotalOut we could have used them
-            Header.CompressedSize = _decompressionStream.Position;
-
-            if (_decompressionStream is DeflateStream deflateStream)
-            {
-                ((IStreamStack)rewindableStream).StackSeek(0);
-            }
+            Header.CompressedSize = decompressionStream.Position;
 
             Skipped = true;
         }
-        var reader = new BinaryReader(rewindableStream);
+        var reader = new BinaryReader(stream, System.Text.Encoding.Default, leaveOpen: true);
         _decompressionStream = null;
         return reader;
     }

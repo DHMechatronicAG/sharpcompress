@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Threading.Tasks;
 using SharpCompress.Common;
 using SharpCompress.Common.Rar;
 using SharpCompress.Compressors.Rar;
@@ -11,7 +12,7 @@ namespace SharpCompress.Readers.Rar;
 /// <summary>
 /// This class faciliates Reading a Rar Archive in a non-seekable forward-only manner
 /// </summary>
-public abstract class RarReader : AbstractReader<RarReaderEntry, RarVolume>
+public abstract partial class RarReader : AbstractReader<RarReaderEntry, RarVolume>
 {
     private bool _disposed;
     private RarVolume? volume;
@@ -26,13 +27,21 @@ public abstract class RarReader : AbstractReader<RarReaderEntry, RarVolume>
     {
         if (!_disposed)
         {
-            if (UnpackV1.IsValueCreated && UnpackV1.Value is IDisposable unpackV1)
-            {
-                unpackV1.Dispose();
-            }
-
+            DisposeUnpackers();
             _disposed = true;
             base.Dispose();
+        }
+    }
+
+    private void DisposeUnpackers()
+    {
+        if (UnpackV1.IsValueCreated && UnpackV1.Value is IDisposable unpackV1)
+        {
+            unpackV1.Dispose();
+        }
+        if (UnpackV2017.IsValueCreated && UnpackV2017.Value is IDisposable unpackV2017)
+        {
+            unpackV2017.Dispose();
         }
     }
 
@@ -40,39 +49,39 @@ public abstract class RarReader : AbstractReader<RarReaderEntry, RarVolume>
 
     public override RarVolume? Volume => volume;
 
-    public static RarReader Open(string filePath, ReaderOptions? options = null)
+    public static IReader OpenReader(string filePath, ReaderOptions? readerOptions = null)
     {
         filePath.NotNullOrEmpty(nameof(filePath));
-        return Open(new FileInfo(filePath), options);
+        return OpenReader(new FileInfo(filePath), readerOptions);
     }
 
-    public static RarReader Open(FileInfo fileInfo, ReaderOptions? options = null)
+    public static IReader OpenReader(FileInfo fileInfo, ReaderOptions? readerOptions = null)
     {
-        options ??= new ReaderOptions { LeaveStreamOpen = false };
-        return Open(fileInfo.OpenRead(), options);
+        readerOptions ??= ReaderOptions.ForFilePath;
+        return OpenReader(fileInfo.OpenRead(), readerOptions);
     }
 
-    public static RarReader Open(IEnumerable<string> filePaths, ReaderOptions? options = null)
+    public static IReader OpenReader(IEnumerable<string> filePaths, ReaderOptions? options = null)
     {
-        return Open(filePaths.Select(x => new FileInfo(x)), options);
+        return OpenReader(filePaths.Select(x => new FileInfo(x)), options);
     }
 
-    public static RarReader Open(IEnumerable<FileInfo> fileInfos, ReaderOptions? options = null)
+    public static IReader OpenReader(IEnumerable<FileInfo> fileInfos, ReaderOptions? options = null)
     {
-        options ??= new ReaderOptions { LeaveStreamOpen = false };
-        return Open(fileInfos.Select(x => x.OpenRead()), options);
+        options ??= ReaderOptions.ForFilePath;
+        return OpenReader(fileInfos.Select(x => x.OpenRead()), options);
     }
 
     /// <summary>
     /// Opens a RarReader for Non-seeking usage with a single volume
     /// </summary>
     /// <param name="stream"></param>
-    /// <param name="options"></param>
+    /// <param name="readerOptions"></param>
     /// <returns></returns>
-    public static RarReader Open(Stream stream, ReaderOptions? options = null)
+    public static IReader OpenReader(Stream stream, ReaderOptions? readerOptions = null)
     {
-        stream.NotNull(nameof(stream));
-        return new SingleVolumeRarReader(stream, options ?? new ReaderOptions());
+        stream.RequireReadable();
+        return new SingleVolumeRarReader(stream, readerOptions ?? ReaderOptions.ForExternalStream);
     }
 
     /// <summary>
@@ -81,10 +90,10 @@ public abstract class RarReader : AbstractReader<RarReaderEntry, RarVolume>
     /// <param name="streams"></param>
     /// <param name="options"></param>
     /// <returns></returns>
-    public static RarReader Open(IEnumerable<Stream> streams, ReaderOptions? options = null)
+    public static IReader OpenReader(IEnumerable<Stream> streams, ReaderOptions? options = null)
     {
-        streams.NotNull(nameof(streams));
-        return new MultiVolumeRarReader(streams, options ?? new ReaderOptions());
+        var streamArray = streams.RequireReadable();
+        return new MultiVolumeRarReader(streamArray, options ?? ReaderOptions.ForExternalStream);
     }
 
     protected override IEnumerable<RarReaderEntry> GetEntries(Stream stream)
@@ -93,7 +102,17 @@ public abstract class RarReader : AbstractReader<RarReaderEntry, RarVolume>
         foreach (var fp in volume.ReadFileParts())
         {
             ValidateArchive(volume);
-            yield return new RarReaderEntry(volume.IsSolidArchive, fp);
+            yield return new RarReaderEntry(volume.IsSolidArchive, fp, Options);
+        }
+    }
+
+    protected override async IAsyncEnumerable<RarReaderEntry> GetEntriesAsync(Stream stream)
+    {
+        volume = new RarReaderVolume(stream, Options, 0);
+        await foreach (var fp in volume.ReadFilePartsAsync().ConfigureAwait(false))
+        {
+            ValidateArchive(volume);
+            yield return new RarReaderEntry(volume.IsSolidArchive, fp, Options);
         }
     }
 
@@ -104,7 +123,7 @@ public abstract class RarReader : AbstractReader<RarReaderEntry, RarVolume>
     {
         if (Entry.IsRedir)
         {
-            throw new InvalidOperationException("no stream for redirect entry");
+            throw new ArchiveOperationException("no stream for redirect entry");
         }
 
         var stream = new MultiVolumeReadOnlyStream(
@@ -125,40 +144,5 @@ public abstract class RarReader : AbstractReader<RarReaderEntry, RarVolume>
         return CreateEntryStream(RarCrcStream.Create(UnpackV2017.Value, Entry.FileHeader, stream));
     }
 
-    protected override async System.Threading.Tasks.Task<EntryStream> GetEntryStreamAsync(
-        System.Threading.CancellationToken cancellationToken = default
-    )
-    {
-        if (Entry.IsRedir)
-        {
-            throw new InvalidOperationException("no stream for redirect entry");
-        }
-
-        var stream = new MultiVolumeReadOnlyStream(
-            CreateFilePartEnumerableForCurrentEntry().Cast<RarFilePart>()
-        );
-        if (Entry.IsRarV3)
-        {
-            return CreateEntryStream(
-                await RarCrcStream
-                    .CreateAsync(UnpackV1.Value, Entry.FileHeader, stream, cancellationToken)
-                    .ConfigureAwait(false)
-            );
-        }
-
-        if (Entry.FileHeader.FileCrc?.Length > 5)
-        {
-            return CreateEntryStream(
-                await RarBLAKE2spStream
-                    .CreateAsync(UnpackV2017.Value, Entry.FileHeader, stream, cancellationToken)
-                    .ConfigureAwait(false)
-            );
-        }
-
-        return CreateEntryStream(
-            await RarCrcStream
-                .CreateAsync(UnpackV2017.Value, Entry.FileHeader, stream, cancellationToken)
-                .ConfigureAwait(false)
-        );
-    }
+    // GetEntryStreamAsync moved to RarReader.Async.cs
 }

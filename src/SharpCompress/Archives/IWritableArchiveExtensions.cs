@@ -1,106 +1,82 @@
-﻿using System;
+using System;
 using System.IO;
-using System.Threading;
-using System.Threading.Tasks;
-using SharpCompress.Writers;
+using SharpCompress.Common.Options;
 
 namespace SharpCompress.Archives;
 
 public static class IWritableArchiveExtensions
 {
-    public static void AddEntry(
-        this IWritableArchive writableArchive,
-        string entryPath,
-        string filePath
-    )
+    extension(IWritableArchive writableArchive)
     {
-        var fileInfo = new FileInfo(filePath);
-        if (!fileInfo.Exists)
+        public void AddAllFromDirectory(
+            string directoryPath,
+            string searchPattern = "*.*",
+            SearchOption searchOption = SearchOption.AllDirectories
+        )
         {
-            throw new FileNotFoundException("Could not AddEntry: " + filePath);
+            using (writableArchive.PauseEntryRebuilding())
+            {
+                foreach (
+                    var filePath in Directory.EnumerateFiles(
+                        directoryPath,
+                        searchPattern,
+                        searchOption
+                    )
+                )
+                {
+                    var fileInfo = new FileInfo(filePath);
+                    writableArchive.AddEntry(
+                        filePath.Substring(directoryPath.Length),
+                        fileInfo.OpenRead(),
+                        true,
+                        fileInfo.Length,
+                        fileInfo.LastWriteTime
+                    );
+                }
+            }
         }
-        writableArchive.AddEntry(
-            entryPath,
-            new FileInfo(filePath).OpenRead(),
-            true,
-            fileInfo.Length,
-            fileInfo.LastWriteTime
-        );
+
+        public IArchiveEntry AddEntry(string key, string file) =>
+            writableArchive.AddEntry(key, new FileInfo(file));
+
+        public IArchiveEntry AddEntry(
+            string key,
+            Stream source,
+            long size = 0,
+            DateTime? modified = null
+        ) => writableArchive.AddEntry(key, source, false, size, modified);
+
+        public IArchiveEntry AddEntry(string key, FileInfo fileInfo)
+        {
+            if (!fileInfo.Exists)
+            {
+                throw new ArgumentException("FileInfo does not exist.");
+            }
+            return writableArchive.AddEntry(
+                key,
+                fileInfo.OpenRead(),
+                true,
+                fileInfo.Length,
+                fileInfo.LastWriteTime
+            );
+        }
     }
 
-    public static void SaveTo(
-        this IWritableArchive writableArchive,
+    public static void SaveTo<TOptions>(
+        this IWritableArchive<TOptions> writableArchive,
         string filePath,
-        WriterOptions options
-    ) => writableArchive.SaveTo(new FileInfo(filePath), options);
-
-    public static void SaveTo(
-        this IWritableArchive writableArchive,
-        FileInfo fileInfo,
-        WriterOptions options
+        TOptions options
     )
+        where TOptions : IWriterOptions => writableArchive.SaveTo(new FileInfo(filePath), options);
+
+    public static void SaveTo<TOptions>(
+        this IWritableArchive<TOptions> writableArchive,
+        FileInfo fileInfo,
+        TOptions options
+    )
+        where TOptions : IWriterOptions
     {
         using var stream = fileInfo.Open(FileMode.Create, FileAccess.Write);
         writableArchive.SaveTo(stream, options);
-    }
-
-    public static Task SaveToAsync(
-        this IWritableArchive writableArchive,
-        string filePath,
-        WriterOptions options,
-        CancellationToken cancellationToken = default
-    ) => writableArchive.SaveToAsync(new FileInfo(filePath), options, cancellationToken);
-
-    public static async Task SaveToAsync(
-        this IWritableArchive writableArchive,
-        FileInfo fileInfo,
-        WriterOptions options,
-        CancellationToken cancellationToken = default
-    )
-    {
-        using var stream = fileInfo.Open(FileMode.Create, FileAccess.Write);
-        await writableArchive.SaveToAsync(stream, options, cancellationToken).ConfigureAwait(false);
-    }
-
-    public static void AddAllFromDirectory(
-        this IWritableArchive writableArchive,
-        string filePath,
-        string searchPattern = "*.*",
-        SearchOption searchOption = SearchOption.AllDirectories
-    )
-    {
-        using (writableArchive.PauseEntryRebuilding())
-        {
-            foreach (var path in Directory.EnumerateFiles(filePath, searchPattern, searchOption))
-            {
-                var fileInfo = new FileInfo(path);
-                writableArchive.AddEntry(
-                    path.Substring(filePath.Length),
-                    fileInfo.OpenRead(),
-                    true,
-                    fileInfo.Length,
-                    fileInfo.LastWriteTime
-                );
-            }
-        }
-    }
-
-    public static IArchiveEntry AddEntry(
-        this IWritableArchive writableArchive,
-        string key,
-        FileInfo fileInfo
-    )
-    {
-        if (!fileInfo.Exists)
-        {
-            throw new ArgumentException("FileInfo does not exist.");
-        }
-        return writableArchive.AddEntry(
-            key,
-            fileInfo.OpenRead(),
-            true,
-            fileInfo.Length,
-            fileInfo.LastWriteTime
-        );
     }
 }

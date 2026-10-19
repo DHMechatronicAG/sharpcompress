@@ -34,6 +34,7 @@ internal class ZipCentralDirectoryEntry
     internal ulong Decompressed { get; set; }
     internal ushort Zip64HeaderOffset { get; set; }
     internal ulong HeaderOffset { get; }
+    internal bool UsesDataDescriptor { get; set; }
 
     /// <summary>
     /// The encryption type used for this entry.
@@ -79,7 +80,12 @@ internal class ZipCentralDirectoryEntry
             || EncryptionType == ZipEncryptionType.Aes256
         )
         {
-            version = 51;
+            version = ActualCompression
+                is ZipCompressionMethod.BZip2
+                    or ZipCompressionMethod.PPMd
+                    or ZipCompressionMethod.ZStandard
+                ? (byte)63
+                : (byte)51;
         }
         else if (
             compression == ZipCompressionMethod.LZMA
@@ -109,7 +115,7 @@ internal class ZipCentralDirectoryEntry
             flags |= HeaderFlags.Encrypted;
         }
 
-        if (!outputStream.CanSeek)
+        if (UsesDataDescriptor)
         {
             // Cannot use data descriptors with zip64:
             // https://blogs.oracle.com/xuemingshen/entry/is_zipinput_outputstream_handling_of

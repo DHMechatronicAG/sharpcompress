@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using SharpCompress.Archives.Zip;
@@ -69,7 +68,6 @@ public class ZipTypesLevelsWithCrcRatioTests : ArchiveTests
         // Calculate and output actual compression ratio
         var originalSize = file1Data.Length + file2Data.Length + file3Data.Length;
         var actualRatio = (double)zipStream.Length / originalSize;
-        //Debug.WriteLine($"Zip_Create_Archive_With_3_Files_Crc32_Test: {compressionType} Level={compressionLevel} Size={sizeMb}MB Expected={expectedRatio:F3} Actual={actualRatio:F3}");
 
         // Verify compression occurred (except for None compression type)
         if (compressionType != CompressionType.None)
@@ -125,7 +123,7 @@ public class ZipTypesLevelsWithCrcRatioTests : ArchiveTests
             CompressionLevel = compressionLevel,
         };
 
-        using (var writer = WriterFactory.Open(zipStream, ArchiveType.Zip, writerOptions))
+        using (var writer = WriterFactory.OpenWriter(zipStream, ArchiveType.Zip, writerOptions))
         {
             writer.Write(
                 $"{compressionType}_level_{compressionLevel}_{sizeMb}MiB.txt",
@@ -135,7 +133,6 @@ public class ZipTypesLevelsWithCrcRatioTests : ArchiveTests
 
         // Calculate and output actual compression ratio
         var actualRatio = (double)zipStream.Length / testData.Length;
-        //Debug.WriteLine($"Zip_WriterFactory_Crc32_Test: {compressionType} Level={compressionLevel} Size={sizeMb}MB Expected={expectedRatio:F3} Actual={actualRatio:F3}");
 
         VerifyCompressionRatio(
             testData.Length,
@@ -146,7 +143,7 @@ public class ZipTypesLevelsWithCrcRatioTests : ArchiveTests
 
         // Verify the archive
         zipStream.Position = 0;
-        using var archive = ZipArchive.Open(zipStream);
+        using var archive = ZipArchive.OpenArchive(zipStream);
 
         var entry = archive.Entries.Single(e => !e.IsDirectory);
         using var entryStream = entry.OpenEntryStream();
@@ -197,11 +194,10 @@ public class ZipTypesLevelsWithCrcRatioTests : ArchiveTests
 
         // Calculate and output actual compression ratio
         var actualRatio = (double)zipStream.Length / testData.Length;
-        //Debug.WriteLine($"Zip_ZipArchiveOpen_Crc32_Test: {compressionType} Level={compressionLevel} Size={sizeMb}MB Expected={expectedRatio:F3} Actual={actualRatio:F3}");
 
         // Verify the archive
         zipStream.Position = 0;
-        using var archive = ZipArchive.Open(zipStream);
+        using var archive = ZipArchive.OpenArchive(zipStream);
 
         var entry = archive.Entries.Single(e => !e.IsDirectory);
         using var entryStream = entry.OpenEntryStream();

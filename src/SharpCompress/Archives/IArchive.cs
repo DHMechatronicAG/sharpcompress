@@ -13,6 +13,11 @@ public interface IArchive : IDisposable
     ArchiveType Type { get; }
 
     /// <summary>
+    /// The options used when opening this archive.
+    /// </summary>
+    ReaderOptions ReaderOptions { get; }
+
+    /// <summary>
     /// Use this method to extract all entries in an archive in order.
     /// This is primarily for SOLID Rar Archives or 7Zip Archives as they need to be
     /// extracted sequentially for the best performance.
@@ -38,5 +43,10 @@ public interface IArchive : IDisposable
     /// <summary>
     /// The total size of the files as uncompressed in the archive.
     /// </summary>
-    long TotalUncompressSize { get; }
+    long TotalUncompressedSize { get; }
+
+    /// <summary>
+    /// Returns whether the archive is encrypted.
+    /// </summary>
+    bool IsEncrypted { get; }
 }

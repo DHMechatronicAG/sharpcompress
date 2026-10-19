@@ -3,12 +3,14 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
+using AwesomeAssertions;
 using SharpCompress.Archives;
 using SharpCompress.Common;
 using SharpCompress.Compressors.Xz;
 using SharpCompress.Crypto;
 using SharpCompress.IO;
 using SharpCompress.Readers;
+using SharpCompress.Test.Mocks;
 using SharpCompress.Writers;
 using SharpCompress.Writers.Zip;
 using Xunit;
@@ -41,17 +43,11 @@ public class ArchiveTests : ReaderTests
     {
         foreach (var path in testArchives)
         {
-            using (
-                var stream = SharpCompressStream.Create(
-                    File.OpenRead(path),
-                    leaveOpen: true,
-                    throwOnDispose: true
-                )
-            )
+            using (var stream = SharpCompressStream.CreateNonDisposing(File.OpenRead(path)))
             {
                 try
                 {
-                    using var archive = ArchiveFactory.Open(stream);
+                    using var archive = ArchiveFactory.OpenArchive(stream);
                     Assert.True(archive.IsSolid);
                     using (var reader = archive.ExtractAllEntries())
                     {
@@ -66,10 +62,7 @@ public class ArchiveTests : ReaderTests
                     }
                     foreach (var entry in archive.Entries.Where(entry => !entry.IsDirectory))
                     {
-                        entry.WriteToDirectory(
-                            SCRATCH_FILES_PATH,
-                            new ExtractionOptions { ExtractFullPath = true, Overwrite = true }
-                        );
+                        entry.WriteToDirectory(SCRATCH_FILES_PATH);
                     }
                     stream.ThrowOnDispose = false;
                 }
@@ -84,8 +77,16 @@ public class ArchiveTests : ReaderTests
         }
     }
 
-    protected void ArchiveStreamRead(string testArchive, ReaderOptions? readerOptions = null) =>
-        ArchiveStreamRead(ArchiveFactory.AutoFactory, testArchive, readerOptions);
+    protected void ArchiveStreamRead(string testArchive, ReaderOptions? readerOptions = null)
+    {
+        testArchive = Path.Combine(TEST_ARCHIVES_PATH, testArchive);
+        ArchiveStreamRead(
+            ArchiveFactory.FindFactory<IArchiveFactory>(testArchive),
+            Path.GetExtension(testArchive),
+            readerOptions,
+            testArchive
+        );
+    }
 
     protected void ArchiveStreamRead(
         IArchiveFactory archiveFactory,
@@ -94,50 +95,60 @@ public class ArchiveTests : ReaderTests
     )
     {
         testArchive = Path.Combine(TEST_ARCHIVES_PATH, testArchive);
-        ArchiveStreamRead(archiveFactory, readerOptions, testArchive);
+        ArchiveStreamRead(
+            archiveFactory,
+            Path.GetExtension(testArchive),
+            readerOptions,
+            testArchive
+        );
     }
 
     protected void ArchiveStreamRead(
+        string extension,
         ReaderOptions? readerOptions = null,
         params string[] testArchives
-    ) => ArchiveStreamRead(ArchiveFactory.AutoFactory, readerOptions, testArchives);
+    )
+    {
+        var testArchive = Path.Combine(TEST_ARCHIVES_PATH, testArchives[0]);
+        ArchiveStreamRead(
+            ArchiveFactory.FindFactory<IArchiveFactory>(testArchive),
+            extension,
+            readerOptions,
+            testArchives
+        );
+    }
 
     protected void ArchiveStreamRead(
         IArchiveFactory archiveFactory,
+        string extension,
         ReaderOptions? readerOptions = null,
         params string[] testArchives
     ) =>
         ArchiveStreamRead(
             archiveFactory,
             readerOptions,
-            testArchives.Select(x => Path.Combine(TEST_ARCHIVES_PATH, x))
+            testArchives.Select(x => Path.Combine(TEST_ARCHIVES_PATH, x)),
+            extension
         );
 
     protected void ArchiveStreamRead(
         IArchiveFactory archiveFactory,
         ReaderOptions? readerOptions,
-        IEnumerable<string> testArchives
+        IEnumerable<string> testArchives,
+        string extension
     )
     {
+        ExtensionTest(extension, archiveFactory);
         foreach (var path in testArchives)
         {
-            using (
-                var stream = SharpCompressStream.Create(
-                    File.OpenRead(path),
-                    leaveOpen: true,
-                    throwOnDispose: true
-                )
-            )
-            using (var archive = archiveFactory.Open(stream, readerOptions))
+            using (var stream = SharpCompressStream.CreateNonDisposing(File.OpenRead(path)))
+            using (var archive = archiveFactory.OpenArchive(stream, readerOptions))
             {
                 try
                 {
                     foreach (var entry in archive.Entries.Where(entry => !entry.IsDirectory))
                     {
-                        entry.WriteToDirectory(
-                            SCRATCH_FILES_PATH,
-                            new ExtractionOptions { ExtractFullPath = true, Overwrite = true }
-                        );
+                        entry.WriteToDirectory(SCRATCH_FILES_PATH);
                     }
                 }
                 catch (IndexOutOfRangeException)
@@ -167,18 +178,15 @@ public class ArchiveTests : ReaderTests
     )
     {
         using (
-            var archive = ArchiveFactory.Open(
-                testArchives.Select(a => new FileInfo(a)),
+            var archive = ArchiveFactory.OpenArchive(
+                testArchives.Select(a => new FileInfo(a)).ToArray(),
                 readerOptions
             )
         )
         {
             foreach (var entry in archive.Entries.Where(entry => !entry.IsDirectory))
             {
-                entry.WriteToDirectory(
-                    SCRATCH_FILES_PATH,
-                    new ExtractionOptions { ExtractFullPath = true, Overwrite = true }
-                );
+                entry.WriteToDirectory(SCRATCH_FILES_PATH);
             }
         }
         VerifyFiles();
@@ -199,18 +207,15 @@ public class ArchiveTests : ReaderTests
     )
     {
         using (
-            var archive = ArchiveFactory.Open(
-                testArchives.Select(f => new FileInfo(f)),
+            var archive = ArchiveFactory.OpenArchive(
+                testArchives.Select(f => new FileInfo(f)).ToArray(),
                 readerOptions
             )
         )
         {
             foreach (var entry in archive.Entries.Where(entry => !entry.IsDirectory))
             {
-                entry.WriteToDirectory(
-                    SCRATCH_FILES_PATH,
-                    new ExtractionOptions { ExtractFullPath = true, Overwrite = true }
-                );
+                entry.WriteToDirectory(SCRATCH_FILES_PATH);
             }
         }
         VerifyFiles();
@@ -234,7 +239,10 @@ public class ArchiveTests : ReaderTests
     )
     {
         var src = testArchives.ToArray();
-        using var archive = ArchiveFactory.Open(src.Select(f => new FileInfo(f)), readerOptions);
+        using var archive = ArchiveFactory.OpenArchive(
+            src.Select(f => new FileInfo(f)).ToArray(),
+            readerOptions
+        );
         var idx = 0;
         foreach (var entry in archive.Entries.Where(entry => !entry.IsDirectory))
         {
@@ -259,7 +267,7 @@ public class ArchiveTests : ReaderTests
     )
     {
         testArchive = Path.Combine(TEST_ARCHIVES_PATH, testArchive);
-        using (var archive = ArchiveFactory.Open(new FileInfo(testArchive), readerOptions))
+        using (var archive = ArchiveFactory.OpenArchive(new FileInfo(testArchive), readerOptions))
         {
             archive.WriteToDirectory(SCRATCH_FILES_PATH);
         }
@@ -267,27 +275,32 @@ public class ArchiveTests : ReaderTests
     }
 
     protected void ArchiveFileRead(
-        IArchiveFactory archiveFactory,
         string testArchive,
-        ReaderOptions? readerOptions = null
+        ReaderOptions? readerOptions = null,
+        IArchiveFactory? archiveFactory = null
     )
     {
         testArchive = Path.Combine(TEST_ARCHIVES_PATH, testArchive);
-        using (var archive = archiveFactory.Open(new FileInfo(testArchive), readerOptions))
+        archiveFactory ??= ArchiveFactory.FindFactory<IArchiveFactory>(testArchive);
+        ExtensionTest(testArchive, archiveFactory);
+        using (var archive = archiveFactory.OpenArchive(new FileInfo(testArchive), readerOptions))
         {
             foreach (var entry in archive.Entries.Where(entry => !entry.IsDirectory))
             {
-                entry.WriteToDirectory(
-                    SCRATCH_FILES_PATH,
-                    new ExtractionOptions { ExtractFullPath = true, Overwrite = true }
-                );
+                entry.WriteToDirectory(SCRATCH_FILES_PATH);
             }
         }
         VerifyFiles();
     }
 
-    protected void ArchiveFileRead(string testArchive, ReaderOptions? readerOptions = null) =>
-        ArchiveFileRead(ArchiveFactory.AutoFactory, testArchive, readerOptions);
+    private void ExtensionTest(string fullPath, IArchiveFactory archiveFactory)
+    {
+        var extension = Path.GetExtension(fullPath).Substring(1);
+        if (!int.TryParse(extension, out _) && "exe" != extension) //exclude parts
+        {
+            extension.Should().BeOneOf(archiveFactory.GetSupportedExtensions());
+        }
+    }
 
     protected void ArchiveFileSkip(
         string testArchive,
@@ -301,7 +314,7 @@ public class ArchiveTests : ReaderTests
         }
         var expected = new Stack<string>(fileOrder.Split(' '));
         testArchive = Path.Combine(TEST_ARCHIVES_PATH, testArchive);
-        using var archive = ArchiveFactory.Open(testArchive, readerOptions);
+        using var archive = ArchiveFactory.OpenArchive(testArchive, readerOptions);
         foreach (var entry in archive.Entries)
         {
             Assert.Equal(expected.Pop(), entry.Key);
@@ -314,20 +327,11 @@ public class ArchiveTests : ReaderTests
     protected void ArchiveFileReadEx(string testArchive)
     {
         testArchive = Path.Combine(TEST_ARCHIVES_PATH, testArchive);
-        using (var archive = ArchiveFactory.Open(testArchive))
+        using (var archive = ArchiveFactory.OpenArchive(testArchive))
         {
             foreach (var entry in archive.Entries.Where(entry => !entry.IsDirectory))
             {
-                entry.WriteToDirectory(
-                    SCRATCH_FILES_PATH,
-                    new ExtractionOptions
-                    {
-                        ExtractFullPath = true,
-                        Overwrite = true,
-                        PreserveAttributes = true,
-                        PreserveFileTime = true,
-                    }
-                );
+                entry.WriteToDirectory(SCRATCH_FILES_PATH);
             }
         }
         VerifyFilesEx();
@@ -336,7 +340,7 @@ public class ArchiveTests : ReaderTests
     protected void ArchiveDeltaDistanceRead(string testArchive)
     {
         testArchive = Path.Combine(TEST_ARCHIVES_PATH, testArchive);
-        using var archive = ArchiveFactory.Open(testArchive);
+        using var archive = ArchiveFactory.OpenArchive(testArchive);
         foreach (var entry in archive.Entries)
         {
             if (!entry.IsDirectory)
@@ -347,9 +351,11 @@ public class ArchiveTests : ReaderTests
                 memory.Position = 0;
 
                 for (var y = 0; y < 9; y++)
-                for (var x = 0; x < 256; x++)
                 {
-                    Assert.Equal(x, memory.ReadByte());
+                    for (var x = 0; x < 256; x++)
+                    {
+                        Assert.Equal(x, memory.ReadByte());
+                    }
                 }
 
                 Assert.Equal(-1, memory.ReadByte());
@@ -371,12 +377,26 @@ public class ArchiveTests : ReaderTests
         int? compressionLevel = null
     )
     {
-        var writerOptions = new ZipWriterOptions(compressionType);
-        if (compressionLevel.HasValue)
-        {
-            writerOptions.CompressionLevel = compressionLevel.Value;
-        }
-        return WriterFactory.Open(stream, ArchiveType.Zip, writerOptions);
+        var writerOptions = compressionLevel.HasValue
+            ? new WriterOptions(compressionType, compressionLevel.Value)
+            : new WriterOptions(compressionType);
+        return WriterFactory.OpenWriter(stream, ArchiveType.Zip, writerOptions);
+    }
+
+    protected static async ValueTask<IAsyncWriter> CreateWriterWithLevelAsync(
+        Stream stream,
+        CompressionType compressionType,
+        int? compressionLevel = null
+    )
+    {
+        var writerOptions = compressionLevel.HasValue
+            ? new WriterOptions(compressionType, compressionLevel.Value) { LeaveStreamOpen = true }
+            : new WriterOptions(compressionType) { LeaveStreamOpen = true };
+        return await WriterFactory.OpenAsyncWriter(
+            new AsyncOnlyStream(stream),
+            ArchiveType.Zip,
+            writerOptions
+        );
     }
 
     /// <summary>
@@ -388,7 +408,7 @@ public class ArchiveTests : ReaderTests
     )
     {
         zipStream.Position = 0;
-        using var archive = ArchiveFactory.Open(zipStream);
+        using var archive = ArchiveFactory.OpenArchive(zipStream);
         Assert.Equal(expectedFiles.Count, archive.Entries.Count());
 
         foreach (var entry in archive.Entries.Where(e => !e.IsDirectory))
@@ -539,7 +559,7 @@ public class ArchiveTests : ReaderTests
     )
     {
         zipStream.Position = 0;
-        using var archive = ArchiveFactory.Open(zipStream);
+        using var archive = ArchiveFactory.OpenArchive(zipStream);
 
         foreach (var entry in archive.Entries.Where(e => !e.IsDirectory))
         {
@@ -556,7 +576,7 @@ public class ArchiveTests : ReaderTests
     )
     {
         zipStream.Position = 0;
-        using var archive = ArchiveFactory.Open(zipStream);
+        using var archive = ArchiveFactory.OpenArchive(zipStream);
 
         var entry = archive.Entries.FirstOrDefault(e => e.Key == entryName && !e.IsDirectory);
         Assert.NotNull(entry);
@@ -578,7 +598,7 @@ public class ArchiveTests : ReaderTests
     {
         testArchive = Path.Combine(TEST_ARCHIVES_PATH, testArchive);
         await ArchiveStreamReadAsync(
-            ArchiveFactory.AutoFactory,
+            ArchiveFactory.FindFactory<IArchiveFactory>(testArchive),
             readerOptions,
             new[] { testArchive }
         );
@@ -592,23 +612,21 @@ public class ArchiveTests : ReaderTests
     {
         foreach (var path in testArchives)
         {
-            using (
-                var stream = SharpCompressStream.Create(
-                    File.OpenRead(path),
-                    leaveOpen: true,
-                    throwOnDispose: true
+            using (var stream = SharpCompressStream.CreateNonDisposing(File.OpenRead(path)))
+            await using (
+                var archive = await archiveFactory.OpenAsyncArchive(
+                    new AsyncOnlyStream(stream),
+                    readerOptions
                 )
             )
-            using (var archive = archiveFactory.Open(stream, readerOptions))
             {
                 try
                 {
-                    foreach (var entry in archive.Entries.Where(entry => !entry.IsDirectory))
+                    await foreach (
+                        var entry in archive.EntriesAsync.Where(entry => !entry.IsDirectory)
+                    )
                     {
-                        await entry.WriteToDirectoryAsync(
-                            SCRATCH_FILES_PATH,
-                            new ExtractionOptions { ExtractFullPath = true, Overwrite = true }
-                        );
+                        await entry.WriteToDirectoryAsync(SCRATCH_FILES_PATH);
                     }
                 }
                 catch (IndexOutOfRangeException)
@@ -620,38 +638,6 @@ public class ArchiveTests : ReaderTests
                 stream.ThrowOnDispose = false;
             }
             VerifyFiles();
-        }
-    }
-
-    [Fact]
-    public void ArchiveFactory_Open_WithPreWrappedStream()
-    {
-        // Test that ArchiveFactory.Open works correctly with a stream that's already wrapped
-        // This addresses the issue where ZIP files fail to open on Linux
-        var testArchive = Path.Combine(TEST_ARCHIVES_PATH, "Zip.bzip2.noEmptyDirs.zip");
-
-        // Open with a pre-wrapped stream
-        using (var fileStream = File.OpenRead(testArchive))
-        using (var wrappedStream = SharpCompressStream.Create(fileStream, bufferSize: 32768))
-        using (var archive = ArchiveFactory.Open(wrappedStream))
-        {
-            Assert.Equal(ArchiveType.Zip, archive.Type);
-            Assert.Equal(3, archive.Entries.Count());
-        }
-    }
-
-    [Fact]
-    public void ArchiveFactory_Open_WithRawFileStream()
-    {
-        // Test that ArchiveFactory.Open works correctly with a raw FileStream
-        // This is the common use case reported in the issue
-        var testArchive = Path.Combine(TEST_ARCHIVES_PATH, "Zip.bzip2.noEmptyDirs.zip");
-
-        using (var stream = File.OpenRead(testArchive))
-        using (var archive = ArchiveFactory.Open(stream))
-        {
-            Assert.Equal(ArchiveType.Zip, archive.Type);
-            Assert.Equal(3, archive.Entries.Count());
         }
     }
 }

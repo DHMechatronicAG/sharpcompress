@@ -6,6 +6,7 @@ using System.Threading.Tasks;
 using SharpCompress.Common;
 using SharpCompress.Crypto;
 using SharpCompress.IO;
+using SharpCompress.Providers;
 
 namespace SharpCompress.Compressors.LZMA;
 
@@ -17,68 +18,88 @@ namespace SharpCompress.Compressors.LZMA;
 /// <summary>
 /// Stream supporting the LZIP format, as documented at http://www.nongnu.org/lzip/manual/lzip_manual.html
 /// </summary>
-public sealed class LZipStream : Stream, IStreamStack
+public sealed partial class LZipStream : Stream, IFinishable
 {
-#if DEBUG_STREAMS
-    long IStreamStack.InstanceId { get; set; }
-#endif
-    int IStreamStack.DefaultBufferSize { get; set; }
-
-    Stream IStreamStack.BaseStream() => _stream;
-
-    int IStreamStack.BufferSize
-    {
-        get => 0;
-        set { }
-    }
-    int IStreamStack.BufferPosition
-    {
-        get => 0;
-        set { }
-    }
-
-    void IStreamStack.SetPosition(long position) { }
-
     private readonly Stream _stream;
-    private readonly SharpCompressStream? _countingWritableSubStream;
+    private readonly CountingStream? _countingWritableSubStream;
+    private readonly CountingStream? _countingReadableSubStream;
+    private readonly uint[]? _crc32Table;
+    private readonly ulong? _expectedDataSize;
+    private readonly ulong? _expectedMemberSize;
+    private readonly bool _skipTrailerValidation;
     private bool _disposed;
     private bool _finished;
+    private bool _trailerValidated;
+    private uint _seed = Crc32Stream.DEFAULT_SEED;
+    private ulong _readCount;
+    private readonly long _memberStartPosition;
+    private readonly long _compressedDataStartPosition;
 
     private long _writeCount;
     private readonly Stream? _originalStream;
+    private readonly bool _leaveOpen;
 
-    public LZipStream(Stream stream, CompressionMode mode)
+    private LZipStream(Stream stream, CompressionMode mode, bool leaveOpen = false)
     {
         Mode = mode;
         _originalStream = stream;
+        _leaveOpen = leaveOpen;
 
         if (mode == CompressionMode.Decompress)
         {
+            _skipTrailerValidation = stream is SharpCompressStream;
+            _memberStartPosition = stream.CanSeek ? stream.Position : 0;
             var dSize = ValidateAndReadSize(stream);
             if (dSize == 0)
             {
                 throw new InvalidFormatException("Not an LZip stream");
             }
             var properties = GetProperties(dSize);
-            _stream = new LzmaStream(properties, stream);
+            var trailerStream = GetSeekableTrailerStream(stream);
+            if (trailerStream is not null)
+            {
+                var position = trailerStream.Position;
+                trailerStream.Position = trailerStream.Length - 16;
+                Span<byte> sizeTrailer = stackalloc byte[16];
+                trailerStream.ReadFully(sizeTrailer);
+                _expectedDataSize = BinaryPrimitives.ReadUInt64LittleEndian(sizeTrailer);
+                _expectedMemberSize = BinaryPrimitives.ReadUInt64LittleEndian(sizeTrailer[8..]);
+                if (_expectedDataSize > long.MaxValue)
+                {
+                    throw new InvalidFormatException("LZip data size is too large.");
+                }
+                trailerStream.Position = position;
+            }
+            _compressedDataStartPosition = stream.CanSeek ? stream.Position : 0;
+            _countingReadableSubStream = new CountingStream(
+                SharpCompressStream.CreateNonDisposing(stream)
+            );
+            _crc32Table = Crc32Stream.InitializeTable(Crc32Stream.DEFAULT_POLYNOMIAL);
+            _stream = LzmaStream.Create(
+                properties,
+                _countingReadableSubStream,
+                inputSize: -1,
+                outputSize: _expectedDataSize.HasValue
+                    ? checked((long)_expectedDataSize.Value)
+                    : -1,
+                leaveOpen: leaveOpen
+            );
         }
         else
         {
             //default
             var dSize = 104 * 1024;
-            WriteHeaderSize(stream);
-
-            _countingWritableSubStream = new SharpCompressStream(stream, leaveOpen: true);
+            _countingWritableSubStream = new CountingStream(
+                SharpCompressStream.CreateNonDisposing(stream)
+            );
             _stream = new Crc32Stream(
-                new LzmaStream(
+                LzmaStream.Create(
                     new LzmaEncoderProperties(true, dSize),
                     false,
+                    null,
                     _countingWritableSubStream
                 )
             );
-#if DEBUG_STREAMS
-            this.DebugConstruct(typeof(LZipStream));
-#endif
         }
     }
 
@@ -91,7 +112,7 @@ public sealed class LZipStream : Stream, IStreamStack
                 var crc32Stream = (Crc32Stream)_stream;
                 crc32Stream.WrappedStream.Dispose();
                 crc32Stream.Dispose();
-                var compressedCount = _countingWritableSubStream.NotNull().InternalPosition;
+                var compressedCount = _countingWritableSubStream.NotNull().BytesWritten;
 
                 Span<byte> intBuf = stackalloc byte[8];
                 BinaryPrimitives.WriteUInt32LittleEndian(intBuf, crc32Stream.Crc);
@@ -117,21 +138,20 @@ public sealed class LZipStream : Stream, IStreamStack
     {
         if (_disposed)
         {
+            base.Dispose(disposing);
             return;
         }
         _disposed = true;
-#if DEBUG_STREAMS
-        this.DebugDispose(typeof(LZipStream));
-#endif
         if (disposing)
         {
             Finish();
             _stream.Dispose();
-            if (Mode == CompressionMode.Compress)
+            if (!_leaveOpen)
             {
                 _originalStream?.Dispose();
             }
         }
+        base.Dispose(disposing);
     }
 
     public CompressionMode Mode { get; }
@@ -154,23 +174,42 @@ public sealed class LZipStream : Stream, IStreamStack
         set => throw new NotImplementedException();
     }
 
-    public override int Read(byte[] buffer, int offset, int count) =>
-        _stream.Read(buffer, offset, count);
+    public override int Read(byte[] buffer, int offset, int count)
+    {
+        var read = _stream.Read(buffer, offset, count);
+        UpdateAndValidateAtEof(buffer.AsSpan(offset, read), read);
+        return read;
+    }
 
-    public override int ReadByte() => _stream.ReadByte();
+    public override int ReadByte()
+    {
+        var value = _stream.ReadByte();
+        if (value == -1)
+        {
+            ValidateTrailer();
+        }
+        else
+        {
+            Span<byte> buffer = stackalloc byte[1];
+            buffer[0] = (byte)value;
+            UpdateChecksum(buffer);
+        }
+
+        return value;
+    }
 
     public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
 
     public override void SetLength(long value) => throw new NotImplementedException();
 
-#if !NETFRAMEWORK && !NETSTANDARD2_0
+#if !LEGACY_DOTNET
 
-    public override ValueTask<int> ReadAsync(
-        Memory<byte> buffer,
-        CancellationToken cancellationToken = default
-    ) => _stream.ReadAsync(buffer, cancellationToken);
-
-    public override int Read(Span<byte> buffer) => _stream.Read(buffer);
+    public override int Read(Span<byte> buffer)
+    {
+        var read = _stream.Read(buffer);
+        UpdateAndValidateAtEof(buffer[..read], read);
+        return read;
+    }
 
     public override void Write(ReadOnlySpan<byte> buffer)
     {
@@ -192,24 +231,7 @@ public sealed class LZipStream : Stream, IStreamStack
         ++_writeCount;
     }
 
-    public override Task<int> ReadAsync(
-        byte[] buffer,
-        int offset,
-        int count,
-        CancellationToken cancellationToken = default
-    ) => _stream.ReadAsync(buffer, offset, count, cancellationToken);
-
-    public override async Task WriteAsync(
-        byte[] buffer,
-        int offset,
-        int count,
-        CancellationToken cancellationToken
-    )
-    {
-        cancellationToken.ThrowIfCancellationRequested();
-        await _stream.WriteAsync(buffer, offset, count, cancellationToken);
-        _writeCount += count;
-    }
+    // Async methods moved to LZipStream.Async.cs
 
     #endregion
 
@@ -231,11 +253,7 @@ public sealed class LZipStream : Stream, IStreamStack
     {
         // Read the header
         Span<byte> header = stackalloc byte[6];
-        var n = stream.Read(header);
-
-        // TODO: Handle reading only part of the header?
-
-        if (n != 6)
+        if (!stream.ReadFully(header))
         {
             return 0;
         }
@@ -250,10 +268,21 @@ public sealed class LZipStream : Stream, IStreamStack
         {
             return 0;
         }
-        var basePower = header[5] & 0x1F;
-        var subtractionNumerator = (header[5] & 0xE0) >> 5;
-        return (1 << basePower) - (subtractionNumerator * (1 << (basePower - 4)));
+        return DecodeDictionarySize(header[5]);
     }
+
+    private static int DecodeDictionarySize(byte encoded)
+    {
+        var basePower = encoded & 0x1F;
+        if (basePower < 12 || basePower > 29)
+        {
+            return 0;
+        }
+        var size = (1 << basePower) - ((encoded >> 5) * (1 << (basePower - 4)));
+        return size >= 4096 ? size : 0;
+    }
+
+    // Async methods moved to LZipStream.Async.cs
 
     private static readonly byte[] headerBytes =
     [
@@ -286,4 +315,130 @@ public sealed class LZipStream : Stream, IStreamStack
             (byte)((dictionarySize >> 16) & 0xff),
             (byte)((dictionarySize >> 24) & 0xff),
         ];
+
+    private static Stream? GetSeekableTrailerStream(Stream stream)
+    {
+        while (stream is SharpCompressStream { IsPassthrough: true } sharpCompressStream)
+        {
+            stream = sharpCompressStream.BaseStream();
+        }
+
+        if (stream is SeekableSharpCompressStream seekableSharpCompressStream)
+        {
+            stream = seekableSharpCompressStream.BaseStream();
+        }
+
+        return stream is SharpCompressStream ? null
+            : stream.CanSeek ? stream
+            : null;
+    }
+
+    private static Stream? GetPhysicalSeekableStream(Stream stream)
+    {
+        while (stream is SharpCompressStream sharpCompressStream)
+        {
+            var baseStream = sharpCompressStream.BaseStream();
+            if (ReferenceEquals(baseStream, stream) || !baseStream.CanSeek)
+            {
+                break;
+            }
+
+            stream = baseStream;
+        }
+
+        return stream.CanSeek ? stream : null;
+    }
+
+    private static bool IsProbeWrapper(Stream stream) =>
+        stream is SharpCompressStream { IsPassthrough: true } sharpCompressStream
+        && sharpCompressStream.BaseStream() is SharpCompressStream { IsPassthrough: false };
+
+    private void UpdateAndValidateAtEof(ReadOnlySpan<byte> buffer, int read)
+    {
+        if (Mode != CompressionMode.Decompress)
+        {
+            return;
+        }
+
+        if (read > 0)
+        {
+            UpdateChecksum(buffer);
+            return;
+        }
+
+        ValidateTrailer();
+    }
+
+    private void UpdateChecksum(ReadOnlySpan<byte> buffer)
+    {
+        _seed = Crc32Stream.CalculateCrc(_crc32Table.NotNull(), _seed, buffer);
+        _readCount += (ulong)buffer.Length;
+    }
+
+    private void ValidateTrailer()
+    {
+        if (_trailerValidated || _skipTrailerValidation || Mode != CompressionMode.Decompress)
+        {
+            return;
+        }
+
+        _trailerValidated = true;
+
+        var countingStream = _countingReadableSubStream.NotNull();
+        ulong? compressedDataSize = null;
+        Span<byte> trailer = stackalloc byte[20];
+        if (_expectedMemberSize.HasValue && countingStream.CanSeek)
+        {
+            compressedDataSize = _expectedMemberSize.Value - 26;
+            countingStream.Position = _compressedDataStartPosition + (long)compressedDataSize.Value;
+            countingStream.ReadFully(trailer);
+        }
+        else if (GetPhysicalSeekableStream(countingStream.WrappedStream) is { } trailerStream)
+        {
+            var position = trailerStream.Position;
+            trailerStream.Position = trailerStream.Length - 20;
+            trailerStream.ReadFully(trailer);
+            trailerStream.Position = position;
+        }
+        else
+        {
+            compressedDataSize = _stream is LzmaStream lzmaStream
+                ? (ulong)lzmaStream.CompressedBytesRead
+                : (ulong)countingStream.BytesRead;
+            if (countingStream.CanSeek)
+            {
+                countingStream.Position =
+                    _compressedDataStartPosition + (long)compressedDataSize.Value;
+            }
+            countingStream.ReadFully(trailer);
+        }
+
+        var expectedCrc = BinaryPrimitives.ReadUInt32LittleEndian(trailer);
+        var expectedDataSize = BinaryPrimitives.ReadUInt64LittleEndian(trailer[4..]);
+        var expectedMemberSize = BinaryPrimitives.ReadUInt64LittleEndian(trailer[12..]);
+
+        var actualCrc = ~_seed;
+        if (actualCrc != expectedCrc)
+        {
+            throw new InvalidFormatException(
+                $"LZip CRC mismatch. Expected 0x{expectedCrc:X8}, actual 0x{actualCrc:X8}."
+            );
+        }
+
+        if (_readCount != expectedDataSize)
+        {
+            throw new InvalidFormatException(
+                $"LZip data size mismatch. Expected {expectedDataSize}, actual {_readCount}."
+            );
+        }
+
+        var actualMemberSize = compressedDataSize ?? expectedMemberSize - 26;
+        actualMemberSize += 26;
+        if (actualMemberSize != expectedMemberSize)
+        {
+            throw new InvalidFormatException(
+                $"LZip member size mismatch. Expected {expectedMemberSize}, actual {actualMemberSize}."
+            );
+        }
+    }
 }

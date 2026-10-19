@@ -1,0 +1,519 @@
+# SharpCompress Usage
+
+## Async/Await Support
+
+SharpCompress now provides full async/await support for all I/O operations. All `Read`, `Write`, and extraction operations have async equivalents ending in `Async` that accept an optional `CancellationToken`. This enables better performance and scalability for I/O-bound operations.
+
+**Key Async Methods:**
+- `reader.WriteEntryToAsync(stream, cancellationToken)` - Extract entry asynchronously  
+- `reader.WriteAllToDirectoryAsync(path, cancellationToken: cancellationToken)` - Extract all asynchronously
+- `writer.WriteAsync(filename, stream, modTime, cancellationToken)` - Write entry asynchronously
+- `writer.WriteAllAsync(directory, pattern, searchOption, cancellationToken)` - Write directory asynchronously
+- `entry.OpenEntryStreamAsync(cancellationToken)` - Open entry stream asynchronously
+
+See [Async Examples](#async-examples) section below for usage patterns.
+
+## Stream Rules
+
+When dealing with Streams, the rule should be that you don't close a stream you didn't create. This, in effect, should mean you should always put a Stream in a using block to dispose it. 
+
+However, the .NET Framework often has classes that will dispose streams by default to make things "easy" like the following:
+
+```C#
+using (var reader = new StreamReader(File.Open("foo")))
+{
+    ...
+}
+```
+
+In this example, reader should get disposed. However, stream rules should say the the `FileStream` created by `File.Open` should remain open. However, the .NET Framework closes it for you by default unless you override the constructor. In general, you should be writing Stream code like this:
+
+```C#
+using (var fileStream = File.Open("foo"))
+using (var reader = new StreamReader(fileStream))
+{
+    ...
+}
+```
+
+To deal with the "correct" rules as well as the expectations of users, I've decided to always close wrapped streams as of 0.21.
+
+To be explicit though, consider always using the overloads that use `ReaderOptions` or `WriterOptions` and explicitly set `LeaveStreamOpen` the way you want.
+
+Default behavior in factory APIs:
+- File path / `FileInfo` overloads set `LeaveStreamOpen = false`.
+- Caller-provided `Stream` overloads set `LeaveStreamOpen = true`.
+
+If using Compression Stream classes directly and you don't want the wrapped stream to be closed.  Use the `NonDisposingStream` as a wrapper to prevent the stream being disposed.  The change in 0.21 simplified a lot even though the usage is a bit more convoluted.
+
+## Samples
+
+Also, look over the tests for more thorough [examples](https://github.com/adamhathcock/sharpcompress/tree/master/tests/SharpCompress.Test)
+
+### Create Zip Archive from multiple files
+```C#
+using(var archive = ZipArchive.CreateArchive())
+{
+    archive.AddEntry("file01.txt", "C:\\file01.txt");
+    archive.AddEntry("file02.txt", "C:\\file02.txt");
+    ...
+    
+    archive.SaveTo("C:\\temp.zip", CompressionType.Deflate);
+}
+```
+
+### Create Zip Archive from all files in a directory to a file
+
+```C#
+using (var archive = ZipArchive.CreateArchive())
+{
+    archive.AddAllFromDirectory("D:\\temp");
+    archive.SaveTo("C:\\temp.zip", CompressionType.Deflate);
+}
+```
+
+### Create Zip Archive from all files in a directory and save in memory
+
+```C#
+var memoryStream = new MemoryStream();
+using (var archive = ZipArchive.CreateArchive())
+{
+    archive.AddAllFromDirectory("D:\\temp");
+    archive.SaveTo(memoryStream, new WriterOptions(CompressionType.Deflate)
+                                {
+                                    LeaveStreamOpen = true
+                                });
+}
+//reset memoryStream to be usable now
+memoryStream.Position = 0;
+```
+
+### Extract all files from a rar file to a directory using RarArchive
+
+Note: Extracting a solid rar or 7z file needs to be done in sequential order to get acceptable decompression speed.
+`ExtractAllEntries` is primarily intended for solid archives (like solid Rar) or 7Zip archives, where sequential extraction provides the best performance. For general/simple extraction with any supported archive type, use `archive.WriteToDirectory()` instead.
+
+```C#
+// Use ReaderOptions for open-time behavior and ExtractionOptions for extract-time behavior
+using (var archive = RarArchive.OpenArchive("Test.rar", ReaderOptions.ForFilePath))
+{
+    // Simple extraction with RarArchive; this WriteToDirectory pattern works for all archive types
+    archive.WriteToDirectory(
+        @"D:\temp",
+        new ExtractionOptions
+        {
+            ExtractFullPath = true,
+            Overwrite = true,
+            BufferSize = 131072,
+            CheckCrc = true, // Default: validate payload checksums when available
+        }
+    );
+}
+```
+
+### Iterate over all files from a Rar file using RarArchive
+
+```C#
+using (var archive = RarArchive.OpenArchive("Test.rar"))
+{
+    foreach (var entry in archive.Entries.Where(entry => !entry.IsDirectory))
+    {
+        Console.WriteLine($"{entry.Key}: {entry.Size} bytes");
+    }
+}
+```
+
+### Extract solid Rar or 7Zip archives with progress reporting
+
+For optimal performance with solid Rar and 7Zip archives, extract entries sequentially. `WriteToDirectory` handles that internally for simple extraction. Use `ExtractAllEntries` when you need to manually iterate in sequential order.
+
+```C#
+using SharpCompress.Common;
+using SharpCompress.Readers;
+
+var progress = new Progress<ProgressReport>(report =>
+{
+    Console.WriteLine($"Extracting {report.EntryPath}: {report.PercentComplete}%");
+});
+
+using (var archive = RarArchive.OpenArchive("archive.rar",
+    ReaderOptions.ForFilePath
+        .WithProgress(progress)))
+{
+    archive.WriteToDirectory(
+        @"D:\output",
+        new ExtractionOptions { ExtractFullPath = true, Overwrite = true, CheckCrc = true }
+    );
+}
+```
+
+Manual sequential extraction:
+
+```C#
+using (var archive = RarArchive.OpenArchive("archive.rar",
+    ReaderOptions.ForFilePath.WithProgress(progress)))
+using (var reader = archive.ExtractAllEntries())
+{
+    while (reader.MoveToNextEntry())
+    {
+        if (!reader.Entry.IsDirectory)
+        {
+            reader.WriteEntryToDirectory(@"D:\output");
+        }
+    }
+}
+```
+
+### Use ReaderFactory to autodetect archive type and Open the entry stream
+
+```C#
+using (Stream stream = File.OpenRead("Tar.tar.bz2"))
+using (var reader = ReaderFactory.OpenReader(stream))
+{
+    while (reader.MoveToNextEntry())
+    {
+        if (!reader.Entry.IsDirectory)
+        {
+            Console.WriteLine(reader.Entry.Key);
+            reader.WriteEntryToDirectory(@"C:\temp");
+        }
+    }
+}
+```
+
+### Use ReaderFactory to autodetect archive type and Open the entry stream
+
+```C#
+using (Stream stream = File.OpenRead("Tar.tar.bz2"))
+using (var reader = ReaderFactory.OpenReader(stream))
+{
+    while (reader.MoveToNextEntry())
+    {
+        if (!reader.Entry.IsDirectory)
+        {
+            using (var entryStream = reader.OpenEntryStream())
+            {
+                entryStream.CopyTo(...);
+            }
+        }
+    }
+}
+```
+
+### Use WriterFactory to write all files from a directory in a streaming manner.
+
+```C#
+using (Stream stream = File.OpenWrite("C:\\temp.tgz"))
+using (var writer = WriterFactory.OpenWriter(
+    stream,
+    ArchiveType.Tar,
+    WriterOptions.ForTar(CompressionType.GZip).WithLeaveStreamOpen(true)))
+{
+    writer.WriteAll("D:\\temp", "*", SearchOption.AllDirectories);
+}
+```
+
+### Use ArchiveFactory to autodetect and open archives
+
+```C#
+if (ArchiveFactory.IsArchive("archive.zip", out var archiveType))
+{
+    Console.WriteLine($"Detected {archiveType}");
+}
+
+using (var archive = ArchiveFactory.OpenArchive("archive.zip"))
+{
+    archive.WriteToDirectory(@"D:\output");
+}
+```
+
+### Detect the format and choose the right API
+
+```C#
+using SharpCompress.Detection;
+
+var archivePath = "archive.arc";
+var detection = ArchiveFactory.DetectArchive(archivePath);
+if (detection is null)
+{
+    Console.WriteLine("Not a supported archive");
+}
+else if (detection.SupportedApis.HasFlag(ArchiveAccessMode.Archive))
+{
+    using var archive = ArchiveFactory.OpenArchive(archivePath);
+    archive.WriteToDirectory(@"D:\output");
+}
+else
+{
+    using var reader = ReaderFactory.OpenReader(archivePath);
+    reader.WriteAllToDirectory(@"D:\output");
+}
+```
+
+`DetectArchive` does not enumerate entries. It reports both Archive and Reader API availability; reader-only formats include Ace, Arc, Arj, standalone LZW, and compressed TAR wrappers.
+
+### Inspect archive metadata
+
+```C#
+var information = ArchiveFactory.InspectArchive(archivePath);
+if (information is not null)
+{
+    Console.WriteLine($"Entries: {information.EntryCount}");
+    Console.WriteLine($"Compressed bytes: {information.CompressedPayloadSize}");
+    Console.WriteLine($"Solid streams: {information.SolidStreamCount}");
+}
+```
+
+`InspectArchive` parses archive metadata, which can require a complete sequential scan for TAR and compressed TAR files. It returns partial information for encrypted headers without a password or missing archive parts; inspect `Status` and `Limitations` before using nullable metadata values.
+
+Detection and inspection result types are in the `SharpCompress.Detection` namespace.
+
+The stream overload preserves the caller's current position and leaves the supplied stream open.
+
+### Open multi-volume archives
+
+```C#
+var parts = ArchiveFactory.GetFileParts("archive.part1.rar")
+    .Select(path => new FileInfo(path))
+    .ToArray();
+
+using (var archive = ArchiveFactory.OpenArchive(parts))
+{
+    archive.WriteToDirectory(@"D:\output");
+}
+```
+
+### Use ReaderOptions for self-extracting archives and detection hints
+
+```C#
+var sfxOptions = ReaderOptions.ForSelfExtractingArchive("password");
+using (var archive = RarArchive.OpenArchive("setup.exe", sfxOptions))
+{
+    archive.WriteToDirectory(@"D:\output");
+}
+
+using (Stream stream = File.OpenRead("backup"))
+using (var reader = ReaderFactory.OpenReader(
+    stream,
+    ReaderOptions.ForExternalStream.WithExtensionHint("tar.gz")))
+{
+    while (reader.MoveToNextEntry())
+    {
+        if (!reader.Entry.IsDirectory)
+        {
+            reader.WriteEntryToDirectory(@"D:\output");
+        }
+    }
+}
+```
+
+### Write ZIP entries with per-entry options
+
+```C#
+using Stream archiveStream = File.Create("output.zip");
+using var writer = new ZipWriter(
+    archiveStream,
+    new ZipWriterOptions(CompressionType.Deflate)
+    {
+        ArchiveComment = "Archive comment",
+        UseZip64 = true,
+    });
+
+using Stream source = File.OpenRead("input.txt");
+writer.Write("entry.txt", source, new ZipWriterEntryOptions
+{
+    CompressionType = CompressionType.ZStandard,
+    CompressionLevel = 3,
+    EntryComment = "Entry comment",
+    ModificationDateTime = DateTime.UtcNow,
+    EnableZip64 = true,
+});
+```
+
+### Write a password-protected ZIP
+
+```C#
+using var destination = File.Create("encrypted.zip");
+using var writer = new ZipWriter(destination, new ZipWriterOptions(CompressionType.Deflate)
+{
+    Password = "your-password",
+    EncryptionType = SharpCompress.Common.Zip.ZipEncryptionType.Aes256,
+    LeaveStreamOpen = true,
+});
+using var source = File.OpenRead("input.txt");
+writer.Write("input.txt", source);
+```
+
+Omitting `EncryptionType` while supplying a password also selects AES-256. AES-128 and traditional PKWARE encryption are available. Encrypted writing requires seekable output and does not support LZMA. The same options work with `WriterFactory.OpenAsyncWriter` and `WriteAsync`.
+
+### Write a 7z archive
+
+```C#
+using Stream stream = File.Create("output.7z");
+using var writer = WriterFactory.OpenWriter(
+    stream,
+    ArchiveType.SevenZip,
+    new SevenZipWriterOptions(CompressionType.LZMA2)
+    {
+        CompressHeader = true,
+    });
+
+using Stream source = File.OpenRead("input.txt");
+writer.Write("input.txt", source, DateTime.UtcNow);
+```
+
+### Extract zip which has non-utf8 encoded filename(cp932)
+
+```C#
+var encoding = Encoding.GetEncoding(932);
+var opts = new ReaderOptions()
+    .WithArchiveEncoding(new ArchiveEncoding
+    {
+        CustomDecoder = (data, x, y) => encoding.GetString(data)
+    });
+
+using var archive = ZipArchive.OpenArchive("test.zip", opts);
+foreach(var entry in archive.Entries)
+{
+    Console.WriteLine($"{entry.Key}");
+}
+```
+
+## Custom Compression Providers
+
+By default `ReaderOptions` and `WriterOptions` already include `CompressionProviderRegistry.Default` via their `Providers` property, so you can read and write without touching the registry yet still get SharpCompress’s built-in implementations.
+
+The configured registry is used consistently across Reader APIs, Writer APIs, Archive APIs, and async entry-stream extraction, including compressed TAR wrappers and ZIP async decompression.
+
+To replace specific algorithms (for example to use `System.IO.Compression` for GZip or Deflate), create a modified registry and pass it through the same options:
+
+```C#
+var customRegistry = CompressionProviderRegistry.Default
+    .With(new SystemGZipCompressionProvider())
+    .With(new SystemDeflateCompressionProvider());
+
+var readerOptions = ReaderOptions.ForFilePath
+    .WithProviders(customRegistry);
+using var reader = ReaderFactory.OpenReader(stream, readerOptions);
+
+var writerOptions = new WriterOptions(CompressionType.GZip)
+    .WithProviders(customRegistry);
+using var writer = WriterFactory.OpenWriter(outputStream, ArchiveType.GZip, writerOptions);
+```
+
+The registry is immutable. `With(provider)` returns a new registry and replaces any existing provider for that provider's `CompressionType`. You can inspect or use providers directly with `GetProvider`, `CreateCompressStream`, `CreateDecompressStream`, and their async/context overloads, but most application code should flow the registry through `ReaderOptions` or `WriterOptions` so archive readers and writers can supply the right `CompressionContext`.
+
+To implement a custom provider, implement `ICompressionProvider` directly or derive from `CompressionProviderBase` for default async methods. Derive from `DecompressionOnlyProviderBase` for read-only codecs. Providers can use `CompressionContext` for stream size, seekability, reader options, compression properties, and format-specific metadata.
+
+The registry also exposes `GetCompressingProvider` (now returning `ICompressionProviderHooks`) when a compression format needs pre- or post-stream data (e.g., LZMA/PPMd). Implementations that need extra headers can supply those bytes through the `ICompressionProviderHooks` members while the rest of the API still works through the `Providers` property.
+
+## Async Examples
+
+### Async Reader Examples
+
+**Extract single entry asynchronously:**
+```C#
+using Stream stream = File.OpenRead("archive.zip");
+await using var reader = await ReaderFactory.OpenAsyncReader(stream, cancellationToken: cancellationToken);
+while (await reader.MoveToNextEntryAsync(cancellationToken))
+{
+    if (!reader.Entry.IsDirectory)
+    {
+        using var outputStream = File.Create("output.bin");
+        await reader.WriteEntryToAsync(outputStream, cancellationToken);
+    }
+}
+```
+
+**Extract all entries asynchronously:**
+```C#
+using Stream stream = File.OpenRead("archive.tar.gz");
+await using var reader = await ReaderFactory.OpenAsyncReader(stream, cancellationToken: cancellationToken);
+await reader.WriteAllToDirectoryAsync(
+    @"D:\temp",
+    cancellationToken: cancellationToken
+);
+```
+
+**Open and process entry stream asynchronously:**
+```C#
+await using var archive = await ZipArchive.OpenAsyncArchive("archive.zip", cancellationToken: cancellationToken);
+await foreach (var entry in archive.EntriesAsync)
+{
+    if (!entry.IsDirectory)
+    {
+        using var entryStream = await entry.OpenEntryStreamAsync(cancellationToken);
+        // Process the decompressed stream asynchronously
+        await ProcessStreamAsync(entryStream, cancellationToken);
+    }
+}
+```
+
+### Async Writer Examples
+
+**Write single file asynchronously:**
+```C#
+using Stream archiveStream = File.OpenWrite("output.zip");
+await using var writer = await WriterFactory.OpenAsyncWriter(archiveStream, ArchiveType.Zip, new WriterOptions(CompressionType.Deflate), cancellationToken);
+using Stream fileStream = File.OpenRead("input.txt");
+await writer.WriteAsync("entry.txt", fileStream, DateTime.Now, cancellationToken);
+```
+
+**Write entire directory asynchronously:**
+```C#
+using Stream stream = File.OpenWrite("backup.tar.gz");
+await using var writer = await WriterFactory.OpenAsyncWriter(stream, ArchiveType.Tar, new WriterOptions(CompressionType.GZip), cancellationToken);
+await writer.WriteAllAsync(
+    @"D:\files",
+    "*",
+    SearchOption.AllDirectories,
+    cancellationToken
+);
+```
+
+**Write with progress tracking and cancellation:**
+```C#
+var cts = new CancellationTokenSource();
+
+// Set timeout or cancel from UI
+cts.CancelAfter(TimeSpan.FromMinutes(5));
+
+using Stream stream = File.OpenWrite("archive.zip");
+await using var writer = await WriterFactory.OpenAsyncWriter(stream, ArchiveType.Zip, new WriterOptions(CompressionType.Deflate), cts.Token);
+try
+{
+    await writer.WriteAllAsync(@"D:\data", "*", SearchOption.AllDirectories, cts.Token);
+}
+catch (OperationCanceledException)
+{
+    Console.WriteLine("Operation was cancelled");
+}
+```
+
+### Archive Async Examples
+
+**Extract from archive asynchronously:**
+```C#
+await using var archive = await ZipArchive.OpenAsyncArchive("archive.zip", cancellationToken: cancellationToken);
+// Simple async extraction - works for all archive types
+await archive.WriteToDirectoryAsync(
+    @"C:\output",
+    cancellationToken: cancellationToken
+);
+```
+
+**Benefits of Async Operations:**
+- Non-blocking I/O for better application responsiveness
+- Improved scalability for server applications
+- Support for cancellation via CancellationToken
+- Better resource utilization in async/await contexts
+- Compatible with modern .NET async patterns
+## Malformed input and memory use
+
+ZIP64 end-record extensible data is skipped with bounded buffering. Invalid record sizes and truncated extensible data are rejected rather than driving allocations from the declared size.
+
+ARC LZW compressed data is buffered incrementally from the bytes actually present. A truncated entry is rejected without preallocating its declared compressed size.
+
+ZIP Shrink output buffering grows with decoded output rather than the declared uncompressed size. Invalid codes and output-size mismatches are rejected.
+
+LZMA/LZMA2 dictionary storage starts small and grows with decoded history, up to the supported dictionary size. These safeguards avoid allocations based solely on forged sizes; they do not impose an overall decompressed-output or process-memory limit.

@@ -4,7 +4,9 @@ using System.IO;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using AwesomeAssertions;
 using SharpCompress.Common;
+using SharpCompress.Factories;
 using SharpCompress.IO;
 using SharpCompress.Readers;
 using SharpCompress.Test.Mocks;
@@ -14,19 +16,14 @@ namespace SharpCompress.Test;
 
 public abstract class ReaderTests : TestBase
 {
-    protected void Read(string testArchive, ReaderOptions? options = null)
-    {
+    protected void Read(string testArchive, ReaderOptions? options = null) =>
         ReadCore(testArchive, options, ReadImpl);
-    }
 
     protected void Read(
         string testArchive,
         CompressionType expectedCompression,
         ReaderOptions? options = null
-    )
-    {
-        ReadCore(testArchive, options, (path, opts) => ReadImpl(path, expectedCompression, opts));
-    }
+    ) => ReadCore(testArchive, options, (path, opts) => ReadImpl(path, expectedCompression, opts));
 
     private void ReadCore(
         string testArchive,
@@ -35,45 +32,36 @@ public abstract class ReaderTests : TestBase
     )
     {
         testArchive = Path.Combine(TEST_ARCHIVES_PATH, testArchive);
-        options ??= new ReaderOptions { BufferSize = 0x20000 };
+        options ??= ReaderOptions.ForFilePath.WithBufferSize(0x20000);
 
-        options.LeaveStreamOpen = true;
-        readImpl(testArchive, options);
+        var optionsWithStreamOpen = options.WithLeaveStreamOpen(true);
+        readImpl(testArchive, optionsWithStreamOpen);
 
-        options.LeaveStreamOpen = false;
-        readImpl(testArchive, options);
+        var optionsWithStreamClosed = options.WithLeaveStreamOpen(false);
+        readImpl(testArchive, optionsWithStreamClosed);
 
         VerifyFiles();
     }
 
-    private void ReadImpl(string testArchive, ReaderOptions options)
-    {
+    private void ReadImpl(string testArchive, ReaderOptions options) =>
         ReadImplCore(testArchive, options, UseReader);
-    }
 
     private void ReadImpl(
         string testArchive,
         CompressionType expectedCompression,
         ReaderOptions options
-    )
-    {
-        ReadImplCore(testArchive, options, r => UseReader(r, expectedCompression));
-    }
+    ) => ReadImplCore(testArchive, options, r => UseReader(r, expectedCompression));
 
     private void ReadImplCore(string testArchive, ReaderOptions options, Action<IReader> useReader)
     {
         using var file = File.OpenRead(testArchive);
-        using var protectedStream = SharpCompressStream.Create(
-            new ForwardOnlyStream(file, options.BufferSize),
-            leaveOpen: true,
-            throwOnDispose: true,
-            bufferSize: options.BufferSize
+        using var protectedStream = SharpCompressStream.CreateNonDisposing(
+            new ForwardOnlyStream(file, options.BufferSize)
         );
         using var testStream = new TestStream(protectedStream);
-        using (var reader = ReaderFactory.Open(testStream, options))
+        using (var reader = ReaderFactory.OpenReader(testStream, options))
         {
             useReader(reader);
-            protectedStream.ThrowOnDispose = false;
             Assert.False(testStream.IsDisposed, $"{nameof(testStream)} prematurely closed");
         }
 
@@ -89,10 +77,7 @@ public abstract class ReaderTests : TestBase
             if (!reader.Entry.IsDirectory)
             {
                 Assert.Equal(expectedCompression, reader.Entry.CompressionType);
-                reader.WriteEntryToDirectory(
-                    SCRATCH_FILES_PATH,
-                    new ExtractionOptions { ExtractFullPath = true, Overwrite = true }
-                );
+                reader.WriteEntryToDirectory(SCRATCH_FILES_PATH);
             }
         }
     }
@@ -103,52 +88,92 @@ public abstract class ReaderTests : TestBase
         {
             if (!reader.Entry.IsDirectory)
             {
-                reader.WriteEntryToDirectory(
-                    SCRATCH_FILES_PATH,
-                    new ExtractionOptions { ExtractFullPath = true, Overwrite = true }
-                );
+                reader.WriteEntryToDirectory(SCRATCH_FILES_PATH);
             }
         }
     }
 
+    protected async Task AssertArchiveAsync(
+        string testArchive,
+        CancellationToken cancellationToken = default
+    )
+    {
+        testArchive = Path.Combine(TEST_ARCHIVES_PATH, testArchive);
+        var factory = new TarFactory();
+        (
+            await factory.IsArchiveAsync(
+                new FileInfo(testArchive).OpenRead(),
+                ReaderOptions.ForExternalStream,
+                cancellationToken
+            )
+        )
+            .Should()
+            .BeTrue();
+        (
+            await factory.IsArchiveAsync(
+                new FileInfo(testArchive).OpenRead(),
+                ReaderOptions.ForExternalStream,
+                cancellationToken: cancellationToken
+            )
+        )
+            .Should()
+            .BeTrue();
+    }
+
     protected async Task ReadAsync(
         string testArchive,
-        CompressionType expectedCompression,
+        CompressionType? expectedCompression = null,
         ReaderOptions? options = null,
         CancellationToken cancellationToken = default
     )
     {
         testArchive = Path.Combine(TEST_ARCHIVES_PATH, testArchive);
 
-        options ??= new ReaderOptions() { BufferSize = 0x20000 };
+        options ??= ReaderOptions.ForExternalStream.WithBufferSize(0x20000);
 
-        options.LeaveStreamOpen = true;
-        await ReadImplAsync(testArchive, expectedCompression, options, cancellationToken);
+        var optionsWithStreamOpen = options.WithLeaveStreamOpen(true);
+        await ReadImplAsync(
+            testArchive,
+            expectedCompression,
+            optionsWithStreamOpen,
+            cancellationToken
+        );
 
-        options.LeaveStreamOpen = false;
-        await ReadImplAsync(testArchive, expectedCompression, options, cancellationToken);
+        var optionsWithStreamClosed = options.WithLeaveStreamOpen(false);
+        await ReadImplAsync(
+            testArchive,
+            expectedCompression,
+            optionsWithStreamClosed,
+            cancellationToken
+        );
+
         VerifyFiles();
     }
 
-    private async Task ReadImplAsync(
+    private async ValueTask ReadImplAsync(
         string testArchive,
-        CompressionType expectedCompression,
+        CompressionType? expectedCompression,
         ReaderOptions options,
         CancellationToken cancellationToken = default
     )
     {
         using var file = File.OpenRead(testArchive);
-        using var protectedStream = SharpCompressStream.Create(
-            new ForwardOnlyStream(file, options.BufferSize),
-            leaveOpen: true,
-            throwOnDispose: true,
-            bufferSize: options.BufferSize
+
+        // SharpCompressStream is not yet an AsyncDisposableStream, so scope its disposal
+        var protectedStream = SharpCompressStream.CreateNonDisposing(
+            new ForwardOnlyStream(file, options.BufferSize)
         );
-        using var testStream = new TestStream(protectedStream);
-        using (var reader = ReaderFactory.Open(testStream, options))
+        await using var protectedStreamScope = protectedStream.DisposeAsyncScope();
+        await using var testStream = new TestStream(protectedStream);
+        await using (
+            var reader = await ReaderFactory.OpenAsyncReader(
+                new AsyncOnlyStream(testStream),
+                options,
+                cancellationToken
+            )
+        )
         {
             await UseReaderAsync(reader, expectedCompression, cancellationToken);
-            protectedStream.ThrowOnDispose = false;
             Assert.False(testStream.IsDisposed, $"{nameof(testStream)} prematurely closed");
         }
 
@@ -157,9 +182,9 @@ public abstract class ReaderTests : TestBase
         Assert.True(options.LeaveStreamOpen != testStream.IsDisposed, message);
     }
 
-    public async Task UseReaderAsync(
-        IReader reader,
-        CompressionType expectedCompression,
+    public async ValueTask UseReaderAsync(
+        IAsyncReader reader,
+        CompressionType? expectedCompression,
         CancellationToken cancellationToken = default
     )
     {
@@ -167,11 +192,14 @@ public abstract class ReaderTests : TestBase
         {
             if (!reader.Entry.IsDirectory)
             {
-                Assert.Equal(expectedCompression, reader.Entry.CompressionType);
+                if (expectedCompression.HasValue)
+                {
+                    Assert.Equal(expectedCompression, reader.Entry.CompressionType);
+                }
+
                 await reader.WriteEntryToDirectoryAsync(
                     SCRATCH_FILES_PATH,
-                    new ExtractionOptions { ExtractFullPath = true, Overwrite = true },
-                    cancellationToken
+                    cancellationToken: cancellationToken
                 );
             }
         }
@@ -180,16 +208,19 @@ public abstract class ReaderTests : TestBase
     protected void ReadForBufferBoundaryCheck(string fileName, CompressionType compressionType)
     {
         using var stream = File.OpenRead(Path.Combine(TEST_ARCHIVES_PATH, fileName));
-        using var reader = ReaderFactory.Open(stream, new ReaderOptions { LookForHeader = true });
+        using var reader = ReaderFactory.OpenReader(
+            stream,
+            ReaderOptions.ForExternalStream with
+            {
+                LookForHeader = true,
+            }
+        );
 
         while (reader.MoveToNextEntry())
         {
             Assert.Equal(compressionType, reader.Entry.CompressionType);
 
-            reader.WriteEntryToDirectory(
-                SCRATCH_FILES_PATH,
-                new ExtractionOptions { ExtractFullPath = true, Overwrite = true }
-            );
+            reader.WriteEntryToDirectory(SCRATCH_FILES_PATH);
         }
 
         CompareFilesByPath(
@@ -214,7 +245,7 @@ public abstract class ReaderTests : TestBase
         testArchive = Path.Combine(TEST_ARCHIVES_PATH, testArchive);
         using var file = File.OpenRead(testArchive);
         using var forward = new ForwardOnlyStream(file);
-        using var reader = ReaderFactory.Open(forward, options);
+        using var reader = ReaderFactory.OpenReader(forward, options);
         while (reader.MoveToNextEntry())
         {
             Assert.Equal(expectedCompression, reader.Entry.CompressionType);
@@ -224,21 +255,16 @@ public abstract class ReaderTests : TestBase
 
     protected void DoMultiReader(
         string[] archives,
-        Func<IEnumerable<Stream>, IDisposable> readerFactory
+        Func<IEnumerable<Stream>, IReader> readerFactory
     )
     {
         using var reader = readerFactory(
             archives.Select(s => Path.Combine(TEST_ARCHIVES_PATH, s)).Select(File.OpenRead)
         );
 
-        dynamic dynReader = reader;
-
-        while (dynReader.MoveToNextEntry())
+        while (reader.MoveToNextEntry())
         {
-            dynReader.WriteEntryToDirectory(
-                SCRATCH_FILES_PATH,
-                new ExtractionOptions { ExtractFullPath = true, Overwrite = true }
-            );
+            reader.WriteEntryToDirectory(SCRATCH_FILES_PATH);
         }
 
         VerifyFiles();

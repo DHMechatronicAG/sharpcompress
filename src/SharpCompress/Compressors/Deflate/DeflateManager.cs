@@ -69,7 +69,9 @@
 // -----------------------------------------------------------------------
 
 using System;
+using System.Buffers;
 using SharpCompress.Algorithms;
+using SharpCompress.Common;
 
 namespace SharpCompress.Compressors.Deflate;
 
@@ -1706,7 +1708,11 @@ internal sealed partial class DeflateManager
         if (memLevel < 1 || memLevel > MEM_LEVEL_MAX)
         {
             throw new ZlibException(
-                string.Format("memLevel must be in the range 1.. {0}", MEM_LEVEL_MAX)
+                string.Format(
+                    Constants.DefaultCultureInfo,
+                    "memLevel must be in the range 1.. {0}",
+                    MEM_LEVEL_MAX
+                )
             );
         }
 
@@ -1721,9 +1727,12 @@ internal sealed partial class DeflateManager
         hash_mask = hash_size - 1;
         hash_shift = ((hash_bits + MIN_MATCH - 1) / MIN_MATCH);
 
-        window = new byte[w_size * 2];
-        prev = new short[w_size];
-        head = new short[hash_size];
+        window = ArrayPool<byte>.Shared.Rent(w_size * 2);
+        prev = ArrayPool<short>.Shared.Rent(w_size);
+        head = ArrayPool<short>.Shared.Rent(hash_size);
+        Array.Clear(window, 0, w_size * 2);
+        Array.Clear(prev, 0, w_size);
+        Array.Clear(head, 0, hash_size);
 
         // for memLevel==8, this will be 16384, 16k
         lit_bufsize = 1 << (memLevel + 6);
@@ -1732,7 +1741,8 @@ internal sealed partial class DeflateManager
         // the output distance codes, and the output length codes (aka tree).
         // orig comment: This works just fine since the average
         // output size for (length,distance) codes is <= 24 bits.
-        pending = new byte[lit_bufsize * 4];
+        pending = ArrayPool<byte>.Shared.Rent(lit_bufsize * 4);
+        Array.Clear(pending, 0, lit_bufsize * 4);
         _distanceOffset = lit_bufsize;
         _lengthOffset = (1 + 2) * lit_bufsize;
 
@@ -1771,20 +1781,46 @@ internal sealed partial class DeflateManager
 
     internal int End()
     {
+        var result = ZlibConstants.Z_OK;
         if (status != INIT_STATE && status != BUSY_STATE && status != FINISH_STATE)
         {
-            return ZlibConstants.Z_STREAM_ERROR;
+            result = ZlibConstants.Z_STREAM_ERROR;
+        }
+        else if (status == BUSY_STATE)
+        {
+            result = ZlibConstants.Z_DATA_ERROR;
         }
 
         // Deallocate in reverse order of allocations:
-        pending = null;
-        head = null;
-        prev = null;
-        window = null;
+        ReturnBuffers();
 
         // free
         // dstate=null;
-        return status == BUSY_STATE ? ZlibConstants.Z_DATA_ERROR : ZlibConstants.Z_OK;
+        return result;
+    }
+
+    private void ReturnBuffers()
+    {
+        if (pending is not null)
+        {
+            ArrayPool<byte>.Shared.Return(pending, clearArray: true);
+            pending = null;
+        }
+        if (head is not null)
+        {
+            ArrayPool<short>.Shared.Return(head, clearArray: true);
+            head = null;
+        }
+        if (prev is not null)
+        {
+            ArrayPool<short>.Shared.Return(prev, clearArray: true);
+            prev = null;
+        }
+        if (window is not null)
+        {
+            ArrayPool<byte>.Shared.Return(window, clearArray: true);
+            window = null;
+        }
     }
 
     private void SetDeflater() =>
@@ -1876,7 +1912,13 @@ internal sealed partial class DeflateManager
             _codec.Message = _ErrorMessage[
                 ZlibConstants.Z_NEED_DICT - (ZlibConstants.Z_STREAM_ERROR)
             ];
-            throw new ZlibException(string.Format("Something is fishy. [{0}]", _codec.Message));
+            throw new ZlibException(
+                string.Format(
+                    Constants.DefaultCultureInfo,
+                    "Something is fishy. [{0}]",
+                    _codec.Message
+                )
+            );
 
             //return ZlibConstants.Z_STREAM_ERROR;
         }

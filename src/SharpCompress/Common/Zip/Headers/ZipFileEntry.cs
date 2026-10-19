@@ -5,15 +5,9 @@ using System.IO;
 
 namespace SharpCompress.Common.Zip.Headers;
 
-internal abstract class ZipFileEntry : ZipHeader
+internal abstract partial class ZipFileEntry(ZipHeaderType type, IArchiveEncoding archiveEncoding)
+    : ZipHeader(type)
 {
-    protected ZipFileEntry(ZipHeaderType type, IArchiveEncoding archiveEncoding)
-        : base(type)
-    {
-        Extra = new List<ExtraData>();
-        ArchiveEncoding = archiveEncoding;
-    }
-
     internal bool IsDirectory
     {
         get
@@ -30,7 +24,7 @@ internal abstract class ZipFileEntry : ZipHeader
 
     internal Stream? PackedStream { get; set; }
 
-    internal IArchiveEncoding ArchiveEncoding { get; }
+    internal IArchiveEncoding ArchiveEncoding { get; } = archiveEncoding;
 
     internal string? Name { get; set; }
 
@@ -44,24 +38,9 @@ internal abstract class ZipFileEntry : ZipHeader
 
     internal long UncompressedSize { get; set; }
 
-    internal List<ExtraData> Extra { get; set; }
+    internal List<ExtraData> Extra { get; set; } = new();
 
     public string? Password { get; set; }
-
-    internal PkwareTraditionalEncryptionData ComposeEncryptionData(Stream archiveStream)
-    {
-        if (archiveStream is null)
-        {
-            throw new ArgumentNullException(nameof(archiveStream));
-        }
-
-        var buffer = new byte[12];
-        archiveStream.ReadFully(buffer);
-
-        var encryptionData = PkwareTraditionalEncryptionData.ForRead(Password!, this, buffer);
-
-        return encryptionData;
-    }
 
     internal WinzipAesEncryptionData? WinzipAesEncryptionData { get; set; }
 
@@ -89,6 +68,8 @@ internal abstract class ZipFileEntry : ZipHeader
 
     internal uint Crc { get; set; }
 
+    internal bool IsCrcAvailable { get; set; }
+
     protected void LoadExtra(byte[] extra)
     {
         for (var i = 0; i < extra.Length; )
@@ -101,7 +82,7 @@ internal abstract class ZipFileEntry : ZipHeader
             }
 
             var type = (ExtraDataType)BinaryPrimitives.ReadUInt16LittleEndian(extra.AsSpan(i));
-            if (!Enum.IsDefined(typeof(ExtraDataType), type))
+            if (!IsDefined(type))
             {
                 type = ExtraDataType.NotImplementedExtraData;
             }
@@ -123,7 +104,7 @@ internal abstract class ZipFileEntry : ZipHeader
             if (i + 4 + length > extra.Length)
             {
                 // incomplete or corrupt field
-                break; // allow processing optional other blocks
+                break; // allow processing other blocks
             }
 
             var data = new byte[length];
@@ -141,4 +122,13 @@ internal abstract class ZipFileEntry : ZipHeader
     internal uint ExternalFileAttributes { get; set; }
 
     internal string? Comment { get; set; }
+
+    private static bool IsDefined(ExtraDataType type)
+    {
+#if LEGACY_DOTNET
+        return Enum.IsDefined(typeof(ExtraDataType), type);
+#else
+        return Enum.IsDefined(type);
+#endif
+    }
 }

@@ -3,6 +3,7 @@ using System.IO;
 using System.Linq;
 using SharpCompress.Archives.Tar;
 using SharpCompress.Common;
+using SharpCompress.Common.Tar.Headers;
 using SharpCompress.Writers.Tar;
 using Xunit;
 
@@ -25,7 +26,7 @@ public class TarWriterDirectoryTests : TestBase
         }
 
         memoryStream.Position = 0;
-        using var archive = TarArchive.Open(memoryStream);
+        using var archive = TarArchive.OpenArchive(memoryStream);
         var entries = archive.Entries.ToList();
 
         Assert.Single(entries);
@@ -48,7 +49,7 @@ public class TarWriterDirectoryTests : TestBase
         }
 
         memoryStream.Position = 0;
-        using var archive = TarArchive.Open(memoryStream);
+        using var archive = TarArchive.OpenArchive(memoryStream);
         var entries = archive.Entries.ToList();
 
         Assert.Single(entries);
@@ -71,7 +72,7 @@ public class TarWriterDirectoryTests : TestBase
         }
 
         memoryStream.Position = 0;
-        using var archive = TarArchive.Open(memoryStream);
+        using var archive = TarArchive.OpenArchive(memoryStream);
         var entries = archive.Entries.ToList();
 
         Assert.Single(entries);
@@ -94,7 +95,7 @@ public class TarWriterDirectoryTests : TestBase
         }
 
         memoryStream.Position = 0;
-        using var archive = TarArchive.Open(memoryStream);
+        using var archive = TarArchive.OpenArchive(memoryStream);
 
         Assert.Empty(archive.Entries);
     }
@@ -116,7 +117,7 @@ public class TarWriterDirectoryTests : TestBase
         }
 
         memoryStream.Position = 0;
-        using var archive = TarArchive.Open(memoryStream);
+        using var archive = TarArchive.OpenArchive(memoryStream);
         var entries = archive.Entries.OrderBy(e => e.Key).ToList();
 
         Assert.Equal(3, entries.Count);
@@ -150,7 +151,7 @@ public class TarWriterDirectoryTests : TestBase
         }
 
         memoryStream.Position = 0;
-        using var archive = TarArchive.Open(memoryStream);
+        using var archive = TarArchive.OpenArchive(memoryStream);
         var entries = archive.Entries.OrderBy(e => e.Key).ToList();
 
         Assert.Equal(3, entries.Count);
@@ -160,5 +161,47 @@ public class TarWriterDirectoryTests : TestBase
         Assert.False(entries[1].IsDirectory);
         Assert.Equal("dir2/", entries[2].Key);
         Assert.True(entries[2].IsDirectory);
+    }
+
+    [Fact]
+    public void TarWriter_WriteDirectory_Ustar_ThrowsForLongDirectoryName()
+    {
+        using var memoryStream = new MemoryStream();
+        using var writer = new TarWriter(
+            memoryStream,
+            new TarWriterOptions(CompressionType.None, true, TarHeaderWriteFormat.USTAR)
+        );
+
+        var longDirectoryName = new string('a', 170);
+        Assert.Throws<InvalidFormatException>(() =>
+            writer.WriteDirectory(longDirectoryName, DateTime.Now)
+        );
+    }
+
+    [Fact]
+    public void TarWriter_WriteDirectory_GnuLongLink_WritesLongDirectoryName()
+    {
+        var longDirectoryName = new string('a', 170);
+
+        using var memoryStream = new MemoryStream();
+        using (
+            var writer = new TarWriter(
+                memoryStream,
+                new TarWriterOptions(
+                    CompressionType.None,
+                    true,
+                    TarHeaderWriteFormat.GNU_TAR_LONG_LINK
+                )
+            )
+        )
+        {
+            writer.WriteDirectory(longDirectoryName, DateTime.Now);
+        }
+
+        memoryStream.Position = 0;
+        using var archive = TarArchive.OpenArchive(memoryStream);
+        var entry = archive.Entries.Single();
+        Assert.Equal(longDirectoryName + "/", entry.Key);
+        Assert.True(entry.IsDirectory);
     }
 }

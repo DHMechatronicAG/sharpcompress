@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Threading;
+using System.Threading.Tasks;
 using SharpCompress.Common;
 using SharpCompress.IO;
 
@@ -21,7 +23,7 @@ internal class ZipWritableArchiveEntry : ZipArchiveEntry, IWritableArchiveEntry
         DateTime? lastModified,
         bool closeStream
     )
-        : base(archive, null)
+        : base(archive, null, archive.ReaderOptions)
     {
         this.stream = stream;
         Key = path;
@@ -36,7 +38,7 @@ internal class ZipWritableArchiveEntry : ZipArchiveEntry, IWritableArchiveEntry
         string directoryPath,
         DateTime? lastModified
     )
-        : base(archive, null)
+        : base(archive, null, archive.ReaderOptions)
     {
         stream = null;
         Key = directoryPath;
@@ -80,7 +82,16 @@ internal class ZipWritableArchiveEntry : ZipArchiveEntry, IWritableArchiveEntry
         }
         //ensure new stream is at the start, this could be reset
         stream.Seek(0, SeekOrigin.Begin);
-        return SharpCompressStream.Create(stream, leaveOpen: true);
+        return SharpCompressStream.CreateNonDisposing(stream);
+    }
+
+    public override ValueTask<Stream> OpenEntryStreamAsync(
+        CancellationToken cancellationToken = default
+    )
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        // Writable entries have no archive parts; opening only rewinds the supplied stream.
+        return new(OpenEntryStream());
     }
 
     internal override void Close()

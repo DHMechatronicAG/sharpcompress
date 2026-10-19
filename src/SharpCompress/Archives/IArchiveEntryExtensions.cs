@@ -7,10 +7,8 @@ using SharpCompress.IO;
 
 namespace SharpCompress.Archives;
 
-public static class IArchiveEntryExtensions
+public static partial class IArchiveEntryExtensions
 {
-    private const int BufferSize = 81920;
-
     /// <param name="archiveEntry">The archive entry to extract.</param>
     extension(IArchiveEntry archiveEntry)
     {
@@ -18,27 +16,52 @@ public static class IArchiveEntryExtensions
         /// Extract entry to the specified stream.
         /// </summary>
         /// <param name="streamToWriteTo">The stream to write the entry content to.</param>
-        /// <param name="progress">Optional progress reporter for tracking extraction progress.</param>
-        public void WriteTo(Stream streamToWriteTo, IProgress<ProgressReport>? progress = null)
-        {
-            if (archiveEntry.IsDirectory)
-            {
-                throw new ExtractionException("Entry is a file directory and cannot be extracted.");
-            }
-
-            using var entryStream = archiveEntry.OpenEntryStream();
-            var sourceStream = WrapWithProgress(entryStream, archiveEntry, progress);
-            sourceStream.CopyTo(streamToWriteTo, BufferSize);
-        }
-
-        /// <summary>
-        /// Extract entry to the specified stream asynchronously.
-        /// </summary>
-        /// <param name="streamToWriteTo">The stream to write the entry content to.</param>
         /// <param name="cancellationToken">Cancellation token.</param>
         /// <param name="progress">Optional progress reporter for tracking extraction progress.</param>
-        public async Task WriteToAsync(
+        [Zomp.SyncMethodGenerator.CreateSyncVersion(PreserveProgress = true)]
+        public async ValueTask WriteToAsync(
             Stream streamToWriteTo,
+            IProgress<ProgressReport>? progress = null,
+            CancellationToken cancellationToken = default
+        ) =>
+            await archiveEntry
+                .WriteToAsync(
+                    streamToWriteTo,
+                    Constants.BufferSize,
+                    progress: progress,
+                    cancellationToken: cancellationToken
+                )
+                .ConfigureAwait(false);
+
+        /// <summary>
+        /// Extract entry to the specified stream.
+        /// </summary>
+        /// <param name="streamToWriteTo">The stream to write the entry content to.</param>
+        /// <param name="options">Options for configuring extraction behavior.</param>
+        /// <param name="progress">Optional progress reporter for tracking extraction progress.</param>
+        /// <param name="cancellationToken">Cancellation token.</param>
+        [Zomp.SyncMethodGenerator.CreateSyncVersion(PreserveProgress = true)]
+        public async ValueTask WriteToAsync(
+            Stream streamToWriteTo,
+            ExtractionOptions options,
+            IProgress<ProgressReport>? progress = null,
+            CancellationToken cancellationToken = default
+        ) =>
+            await archiveEntry
+                .WriteToAsync(
+                    streamToWriteTo,
+                    options.BufferSize,
+                    options,
+                    progress,
+                    cancellationToken
+                )
+                .ConfigureAwait(false);
+
+        [Zomp.SyncMethodGenerator.CreateSyncVersion(PreserveProgress = true)]
+        private async ValueTask WriteToAsync(
+            Stream streamToWriteTo,
+            int? bufferSize,
+            ExtractionOptions? options = null,
             IProgress<ProgressReport>? progress = null,
             CancellationToken cancellationToken = default
         )
@@ -48,10 +71,22 @@ public static class IArchiveEntryExtensions
                 throw new ExtractionException("Entry is a file directory and cannot be extracted.");
             }
 
-            using var entryStream = await archiveEntry.OpenEntryStreamAsync(cancellationToken);
-            var sourceStream = WrapWithProgress(entryStream, archiveEntry, progress);
+#if SYNC_ONLY
+            using var entryStream = archiveEntry.OpenEntryStream();
+#else
+            var entryStream = await archiveEntry
+                .OpenEntryStreamAsync(cancellationToken)
+                .ConfigureAwait(false);
+            await using var entryStreamScope = entryStream
+                .DisposeAsyncScope()
+                .ConfigureAwait(false);
+#endif
+            var checkedStream = options is null
+                ? entryStream
+                : IEntryExtensions.WrapWithChecksumValidation(archiveEntry, entryStream, options);
+            var sourceStream = WrapWithProgress(checkedStream, archiveEntry, progress);
             await sourceStream
-                .CopyToAsync(streamToWriteTo, BufferSize, cancellationToken)
+                .CopyToAsync(streamToWriteTo, bufferSize ?? Constants.BufferSize, cancellationToken)
                 .ConfigureAwait(false);
         }
     }
@@ -96,66 +131,52 @@ public static class IArchiveEntryExtensions
         /// <summary>
         /// Extract to specific directory, retaining filename
         /// </summary>
-        public void WriteToDirectory(
-            string destinationDirectory,
-            ExtractionOptions? options = null
-        ) =>
-            ExtractionMethods.WriteEntryToDirectory(
-                entry,
-                destinationDirectory,
-                options,
-                entry.WriteToFile
-            );
-
-        /// <summary>
-        /// Extract to specific directory asynchronously, retaining filename
-        /// </summary>
-        public Task WriteToDirectoryAsync(
+        [Zomp.SyncMethodGenerator.CreateSyncVersion]
+        public async ValueTask WriteToDirectoryAsync(
             string destinationDirectory,
             ExtractionOptions? options = null,
             CancellationToken cancellationToken = default
         ) =>
-            ExtractionMethods.WriteEntryToDirectoryAsync(
-                entry,
-                destinationDirectory,
-                options,
-                entry.WriteToFileAsync,
-                cancellationToken
-            );
+            await entry
+                .WriteEntryToDirectoryAsync(
+                    destinationDirectory,
+                    options,
+                    async (path, ct) =>
+                        await entry.WriteToFileAsync(path, options, ct).ConfigureAwait(false),
+                    cancellationToken
+                )
+                .ConfigureAwait(false);
 
         /// <summary>
         /// Extract to specific file
         /// </summary>
-        public void WriteToFile(string destinationFileName, ExtractionOptions? options = null) =>
-            ExtractionMethods.WriteEntryToFile(
-                entry,
-                destinationFileName,
-                options,
-                (x, fm) =>
-                {
-                    using var fs = File.Open(destinationFileName, fm);
-                    entry.WriteTo(fs);
-                }
-            );
-
-        /// <summary>
-        /// Extract to specific file asynchronously
-        /// </summary>
-        public Task WriteToFileAsync(
+        [Zomp.SyncMethodGenerator.CreateSyncVersion]
+        public async ValueTask WriteToFileAsync(
             string destinationFileName,
             ExtractionOptions? options = null,
             CancellationToken cancellationToken = default
-        ) =>
-            ExtractionMethods.WriteEntryToFileAsync(
-                entry,
-                destinationFileName,
-                options,
-                async (x, fm, ct) =>
-                {
-                    using var fs = File.Open(destinationFileName, fm);
-                    await entry.WriteToAsync(fs, null, ct).ConfigureAwait(false);
-                },
-                cancellationToken
-            );
+        )
+        {
+            options ??= new ExtractionOptions();
+            await entry
+                .WriteEntryToFileAsync(
+                    destinationFileName,
+                    options,
+                    async (x, fm, ct) =>
+                    {
+#if SYNC_ONLY
+                        using var fs = File.Open(x, fm);
+#else
+                        var fs = File.Open(x, fm);
+                        await using var scope = fs.DisposeAsyncScope().ConfigureAwait(false);
+#endif
+                        await entry
+                            .WriteToAsync(fs, options.BufferSize, options, null, ct)
+                            .ConfigureAwait(false);
+                    },
+                    cancellationToken
+                )
+                .ConfigureAwait(false);
+        }
     }
 }

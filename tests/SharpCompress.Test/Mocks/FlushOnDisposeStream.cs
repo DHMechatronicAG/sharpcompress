@@ -1,5 +1,7 @@
 using System;
 using System.IO;
+using System.Threading.Tasks;
+using SharpCompress.IO;
 
 namespace SharpCompress.Test.Mocks;
 
@@ -7,7 +9,7 @@ namespace SharpCompress.Test.Mocks;
 // CryptoStream doesn't always trigger the Flush, so this class is used instead
 // See https://referencesource.microsoft.com/#mscorlib/system/security/cryptography/cryptostream.cs,141
 
-public class FlushOnDisposeStream(Stream innerStream) : Stream
+public class FlushOnDisposeStream(Stream innerStream) : AsyncDisposableStream
 {
     public override bool CanRead => innerStream.CanRead;
 
@@ -45,5 +47,12 @@ public class FlushOnDisposeStream(Stream innerStream) : Stream
         }
 
         base.Dispose(disposing);
+    }
+
+    public override async ValueTask DisposeAsync()
+    {
+        await innerStream.FlushAsync();
+        innerStream.Close();
+        await base.DisposeAsync();
     }
 }

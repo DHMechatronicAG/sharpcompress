@@ -32,32 +32,16 @@ using System.IO;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
-using SharpCompress.IO;
+using SharpCompress.Common;
+using SharpCompress.Common.Options;
 
 namespace SharpCompress.Compressors.Deflate;
 
-public class GZipStream : Stream, IStreamStack
-{
-#if DEBUG_STREAMS
-    long IStreamStack.InstanceId { get; set; }
+public partial class GZipStream : Stream
+#if LEGACY_DOTNET
+        , IAsyncDisposable
 #endif
-    int IStreamStack.DefaultBufferSize { get; set; }
-
-    Stream IStreamStack.BaseStream() => BaseStream;
-
-    int IStreamStack.BufferSize
-    {
-        get => 0;
-        set { }
-    }
-    int IStreamStack.BufferPosition
-    {
-        get => 0;
-        set { }
-    }
-
-    void IStreamStack.SetPosition(long position) { }
-
+{
     internal static readonly DateTime UNIX_EPOCH = new(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc);
 
     private string? _comment;
@@ -74,20 +58,41 @@ public class GZipStream : Stream, IStreamStack
     public GZipStream(Stream stream, CompressionMode mode)
         : this(stream, mode, CompressionLevel.Default, Encoding.UTF8) { }
 
-    public GZipStream(Stream stream, CompressionMode mode, CompressionLevel level)
-        : this(stream, mode, level, Encoding.UTF8) { }
+    public GZipStream(Stream stream, CompressionMode mode, IReaderOptions readerOptions)
+        : this(stream, mode, CompressionLevel.Default, readerOptions) { }
 
     public GZipStream(
         Stream stream,
         CompressionMode mode,
         CompressionLevel level,
-        Encoding encoding
+        IReaderOptions readerOptions
+    )
+        : this(
+            stream,
+            mode,
+            level,
+            (
+                readerOptions ?? throw new ArgumentNullException(nameof(readerOptions))
+            ).ArchiveEncoding.GetEncoding(),
+            readerOptions.LeaveStreamOpen
+        ) { }
+
+    public GZipStream(
+        Stream stream,
+        CompressionMode mode,
+        CompressionLevel level,
+        Encoding encoding,
+        bool leaveOpen = false
     )
     {
-        BaseStream = new ZlibBaseStream(stream, mode, level, ZlibStreamFlavor.GZIP, encoding);
-#if DEBUG_STREAMS
-        this.DebugConstruct(typeof(GZipStream));
-#endif
+        BaseStream = new ZlibBaseStream(
+            stream,
+            mode,
+            level,
+            ZlibStreamFlavor.GZIP,
+            leaveOpen,
+            encoding
+        );
         _encoding = encoding;
     }
 
@@ -123,6 +128,7 @@ public class GZipStream : Stream, IStreamStack
             {
                 throw new ZlibException(
                     string.Format(
+                        Constants.DefaultCultureInfo,
                         "Don't be silly. {0} bytes?? Use a bigger buffer, at least {1}.",
                         value,
                         ZlibConstants.WorkingBufferSizeMin
@@ -236,9 +242,6 @@ public class GZipStream : Stream, IStreamStack
                     Crc32 = BaseStream.Crc32;
                 }
                 _disposed = true;
-#if DEBUG_STREAMS
-                this.DebugDispose(typeof(GZipStream));
-#endif
             }
         }
         finally
@@ -246,127 +249,6 @@ public class GZipStream : Stream, IStreamStack
             base.Dispose(disposing);
         }
     }
-
-    /// <summary>
-    /// Flush the stream.
-    /// </summary>
-    public override void Flush()
-    {
-        if (_disposed)
-        {
-            throw new ObjectDisposedException("GZipStream");
-        }
-        BaseStream.Flush();
-    }
-
-    public override async Task FlushAsync(CancellationToken cancellationToken)
-    {
-        if (_disposed)
-        {
-            throw new ObjectDisposedException("GZipStream");
-        }
-        await BaseStream.FlushAsync(cancellationToken).ConfigureAwait(false);
-    }
-
-    /// <summary>
-    ///   Read and decompress data from the source stream.
-    /// </summary>
-    ///
-    /// <remarks>
-    ///   With a <c>GZipStream</c>, decompression is done through reading.
-    /// </remarks>
-    ///
-    /// <example>
-    /// <code>
-    /// byte[] working = new byte[WORKING_BUFFER_SIZE];
-    /// using (System.IO.Stream input = System.IO.File.OpenRead(_CompressedFile))
-    /// {
-    ///     using (Stream decompressor= new Ionic.Zlib.GZipStream(input, CompressionMode.Decompress, true))
-    ///     {
-    ///         using (var output = System.IO.File.Create(_DecompressedFile))
-    ///         {
-    ///             int n;
-    ///             while ((n= decompressor.Read(working, 0, working.Length)) !=0)
-    ///             {
-    ///                 output.Write(working, 0, n);
-    ///             }
-    ///         }
-    ///     }
-    /// }
-    /// </code>
-    /// </example>
-    /// <param name="buffer">The buffer into which the decompressed data should be placed.</param>
-    /// <param name="offset">the offset within that data array to put the first byte read.</param>
-    /// <param name="count">the number of bytes to read.</param>
-    /// <returns>the number of bytes actually read</returns>
-    public override int Read(byte[] buffer, int offset, int count)
-    {
-        if (_disposed)
-        {
-            throw new ObjectDisposedException("GZipStream");
-        }
-        var n = BaseStream.Read(buffer, offset, count);
-
-        // Console.WriteLine("GZipStream::Read(buffer, off({0}), c({1}) = {2}", offset, count, n);
-        // Console.WriteLine( Util.FormatByteArray(buffer, offset, n) );
-
-        if (!_firstReadDone)
-        {
-            _firstReadDone = true;
-            FileName = BaseStream._GzipFileName;
-            Comment = BaseStream._GzipComment;
-            LastModified = BaseStream._GzipMtime;
-        }
-        return n;
-    }
-
-    public override async Task<int> ReadAsync(
-        byte[] buffer,
-        int offset,
-        int count,
-        CancellationToken cancellationToken
-    )
-    {
-        if (_disposed)
-        {
-            throw new ObjectDisposedException("GZipStream");
-        }
-        var n = await BaseStream
-            .ReadAsync(buffer, offset, count, cancellationToken)
-            .ConfigureAwait(false);
-
-        if (!_firstReadDone)
-        {
-            _firstReadDone = true;
-            FileName = BaseStream._GzipFileName;
-            Comment = BaseStream._GzipComment;
-            LastModified = BaseStream._GzipMtime;
-        }
-        return n;
-    }
-
-#if !NETFRAMEWORK && !NETSTANDARD2_0
-    public override async ValueTask<int> ReadAsync(
-        Memory<byte> buffer,
-        CancellationToken cancellationToken = default
-    )
-    {
-        if (_disposed)
-        {
-            throw new ObjectDisposedException("GZipStream");
-        }
-        var n = await BaseStream.ReadAsync(buffer, cancellationToken).ConfigureAwait(false);
-
-        if (!_firstReadDone)
-        {
-            _firstReadDone = true;
-            FileName = BaseStream._GzipFileName;
-            Comment = BaseStream._GzipComment;
-            LastModified = BaseStream._GzipMtime;
-        }
-        return n;
-    }
-#endif
 
     /// <summary>
     ///   Calling this method always throws a <see cref="NotImplementedException"/>.
@@ -381,122 +263,6 @@ public class GZipStream : Stream, IStreamStack
     /// </summary>
     /// <param name="value">irrelevant; this method will always throw!</param>
     public override void SetLength(long value) => throw new NotSupportedException();
-
-    /// <summary>
-    ///   Write data to the stream.
-    /// </summary>
-    ///
-    /// <remarks>
-    /// <para>
-    ///   If you wish to use the <c>GZipStream</c> to compress data while writing,
-    ///   you can create a <c>GZipStream</c> with <c>CompressionMode.Compress</c>, and a
-    ///   writable output stream.  Then call <c>Write()</c> on that <c>GZipStream</c>,
-    ///   providing uncompressed data as input.  The data sent to the output stream
-    ///   will be the compressed form of the data written.
-    /// </para>
-    ///
-    /// <para>
-    ///   A <c>GZipStream</c> can be used for <c>Read()</c> or <c>Write()</c>, but not
-    ///   both. Writing implies compression.  Reading implies decompression.
-    /// </para>
-    ///
-    /// </remarks>
-    /// <param name="buffer">The buffer holding data to write to the stream.</param>
-    /// <param name="offset">the offset within that data array to find the first byte to write.</param>
-    /// <param name="count">the number of bytes to write.</param>
-    public override void Write(byte[] buffer, int offset, int count)
-    {
-        if (_disposed)
-        {
-            throw new ObjectDisposedException("GZipStream");
-        }
-        if (BaseStream._streamMode == ZlibBaseStream.StreamMode.Undefined)
-        {
-            //Console.WriteLine("GZipStream: First write");
-            if (BaseStream._wantCompress)
-            {
-                // first write in compression, therefore, emit the GZIP header
-                _headerByteCount = EmitHeader();
-            }
-            else
-            {
-                throw new InvalidOperationException();
-            }
-        }
-
-        BaseStream.Write(buffer, offset, count);
-    }
-
-    public override async Task WriteAsync(
-        byte[] buffer,
-        int offset,
-        int count,
-        CancellationToken cancellationToken
-    )
-    {
-        if (_disposed)
-        {
-            throw new ObjectDisposedException("GZipStream");
-        }
-        if (BaseStream._streamMode == ZlibBaseStream.StreamMode.Undefined)
-        {
-            if (BaseStream._wantCompress)
-            {
-                // first write in compression, therefore, emit the GZIP header
-                _headerByteCount = EmitHeader();
-            }
-            else
-            {
-                throw new InvalidOperationException();
-            }
-        }
-
-        await BaseStream.WriteAsync(buffer, offset, count, cancellationToken).ConfigureAwait(false);
-    }
-
-#if !NETFRAMEWORK && !NETSTANDARD2_0
-    public override async ValueTask WriteAsync(
-        ReadOnlyMemory<byte> buffer,
-        CancellationToken cancellationToken = default
-    )
-    {
-        if (_disposed)
-        {
-            throw new ObjectDisposedException("GZipStream");
-        }
-        if (BaseStream._streamMode == ZlibBaseStream.StreamMode.Undefined)
-        {
-            if (BaseStream._wantCompress)
-            {
-                // first write in compression, therefore, emit the GZIP header
-                _headerByteCount = EmitHeader();
-            }
-            else
-            {
-                throw new InvalidOperationException();
-            }
-        }
-
-        await BaseStream.WriteAsync(buffer, cancellationToken).ConfigureAwait(false);
-    }
-
-    public override async ValueTask DisposeAsync()
-    {
-        if (_disposed)
-        {
-            return;
-        }
-        _disposed = true;
-        if (BaseStream != null)
-        {
-            await BaseStream.DisposeAsync().ConfigureAwait(false);
-        }
-#if DEBUG_STREAMS
-        this.DebugDispose(typeof(GZipStream));
-#endif
-        await base.DisposeAsync().ConfigureAwait(false);
-    }
-#endif
 
     #endregion Stream methods
 
@@ -540,16 +306,24 @@ public class GZipStream : Stream, IStreamStack
             {
                 return;
             }
+#if LEGACY_DOTNET
             if (_fileName.Contains('/'))
+#else
+            if (_fileName.Contains('/', StringComparison.Ordinal))
+#endif
             {
                 _fileName = _fileName.Replace('/', '\\');
             }
             if (_fileName.EndsWith('\\'))
             {
-                throw new InvalidOperationException("Illegal filename");
+                throw new ArchiveOperationException("Illegal filename");
             }
 
+#if LEGACY_DOTNET
             if (_fileName.Contains('\\'))
+#else
+            if (_fileName.Contains('\\', StringComparison.Ordinal))
+#endif
             {
                 // trim any leading path
                 _fileName = Path.GetFileName(_fileName);
@@ -559,7 +333,7 @@ public class GZipStream : Stream, IStreamStack
 
     public int Crc32 { get; private set; }
 
-    private int EmitHeader()
+    private byte[] BuildHeader()
     {
         var commentBytes = (Comment is null) ? null : _encoding.GetBytes(Comment);
         var filenameBytes = (FileName is null) ? null : _encoding.GetBytes(FileName);
@@ -623,8 +397,16 @@ public class GZipStream : Stream, IStreamStack
             header[i++] = 0; // terminate
         }
 
-        BaseStream._stream.Write(header, 0, header.Length);
+        return header;
+    }
 
+    [Zomp.SyncMethodGenerator.CreateSyncVersion]
+    private async ValueTask<int> EmitHeaderAsync(CancellationToken cancellationToken)
+    {
+        var header = BuildHeader();
+        await BaseStream
+            ._stream.WriteAsync(header, 0, header.Length, cancellationToken)
+            .ConfigureAwait(false);
         return header.Length; // bytes written
     }
 }

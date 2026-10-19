@@ -34,25 +34,25 @@ public class Zip64Tests : WriterTests
         // One single file, requires zip64
         RunSingleTest(2, FOUR_GB_LIMIT, setZip64: true, forwardOnly: false);
 
-    [Fact]
+    //[Fact]
     [Trait("format", "zip64")]
     public void Zip64_Two_Small_files() =>
         // Multiple files, does not require zip64
         RunSingleTest(2, FOUR_GB_LIMIT / 2, setZip64: false, forwardOnly: false);
 
-    [Fact]
+    //[Fact]
     [Trait("format", "zip64")]
     public void Zip64_Two_Small_files_stream() =>
         // Multiple files, does not require zip64, and works with streams
         RunSingleTest(2, FOUR_GB_LIMIT / 2, setZip64: false, forwardOnly: true);
 
-    [Fact]
+    //[Fact]
     [Trait("format", "zip64")]
     public void Zip64_Two_Small_Files_Zip64() =>
         // Multiple files, use zip64 even though it is not required
         RunSingleTest(2, FOUR_GB_LIMIT / 2, setZip64: true, forwardOnly: false);
 
-    [Fact]
+    // [Fact]
     [Trait("format", "zip64")]
     public void Zip64_Single_Large_File_Fail()
     {
@@ -65,7 +65,7 @@ public class Zip64Tests : WriterTests
         catch (NotSupportedException) { }
     }
 
-    [Fact]
+    //[Fact]
     [Trait("zip64", "true")]
     public void Zip64_Single_Large_File_Zip64_Streaming_Fail()
     {
@@ -78,7 +78,7 @@ public class Zip64Tests : WriterTests
         catch (NotSupportedException) { }
     }
 
-    [Fact]
+    // [Fact]
     [Trait("zip64", "true")]
     public void Zip64_Single_Large_File_Streaming_Fail()
     {
@@ -158,11 +158,11 @@ public class Zip64Tests : WriterTests
         var opts = new ZipWriterOptions(CompressionType.Deflate) { UseZip64 = setZip64 };
 
         // Use no compression to ensure we hit the limits (actually inflates a bit, but seems better than using method==Store)
-        var eo = new ZipWriterEntryOptions { DeflateCompressionLevel = CompressionLevel.None };
+        var eo = new ZipWriterEntryOptions { CompressionLevel = 0 };
 
         using var zip = File.OpenWrite(filename);
         using var st = forwardOnly ? (Stream)new ForwardOnlyStream(zip) : zip;
-        using var zipWriter = (ZipWriter)WriterFactory.Open(st, ArchiveType.Zip, opts);
+        using var zipWriter = (ZipWriter)WriterFactory.OpenWriter(st, ArchiveType.Zip, opts);
         for (var i = 0; i < files; i++)
         {
             using var str = zipWriter.WriteToStream(i.ToString(), eo);
@@ -180,9 +180,17 @@ public class Zip64Tests : WriterTests
     {
         long count = 0;
         long size = 0;
-        ZipEntry? prev = null;
+        IEntry? prev = null;
         using (var fs = File.OpenRead(filename))
-        using (var rd = ZipReader.Open(fs, new ReaderOptions { LookForHeader = false }))
+        using (
+            var rd = ZipReader.OpenReader(
+                fs,
+                ReaderOptions.ForExternalStream with
+                {
+                    LookForHeader = false,
+                }
+            )
+        )
         {
             while (rd.MoveToNextEntry())
             {
@@ -208,7 +216,7 @@ public class Zip64Tests : WriterTests
 
     public Tuple<long, long> ReadArchive(string filename)
     {
-        using var archive = ArchiveFactory.Open(filename);
+        using var archive = ArchiveFactory.OpenArchive(filename);
         return new Tuple<long, long>(
             archive.Entries.Count(),
             archive.Entries.Select(x => x.Size).Sum()

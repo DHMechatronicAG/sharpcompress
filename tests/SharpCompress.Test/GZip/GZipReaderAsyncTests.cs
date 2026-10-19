@@ -1,4 +1,5 @@
 using System.IO;
+using System.IO.Compression;
 using System.Threading.Tasks;
 using SharpCompress.Common;
 using SharpCompress.IO;
@@ -14,16 +15,16 @@ public class GZipReaderAsyncTests : ReaderTests
     public GZipReaderAsyncTests() => UseExtensionInsteadOfNameToVerify = true;
 
     [Fact]
-    public async Task GZip_Reader_Generic_Async() =>
+    public async ValueTask GZip_Reader_Generic_Async() =>
         await ReadAsync("Tar.tar.gz", CompressionType.GZip);
 
     [Fact]
-    public async Task GZip_Reader_Generic2_Async()
+    public async ValueTask GZip_Reader_Generic2_Async()
     {
         //read only as GZip item
         using Stream stream = File.OpenRead(Path.Combine(TEST_ARCHIVES_PATH, "Tar.tar.gz"));
-        using var reader = GZipReader.Open(new SharpCompressStream(stream));
-        while (reader.MoveToNextEntry())
+        await using var reader = await GZipReader.OpenAsyncReader(new AsyncOnlyStream(stream));
+        while (await reader.MoveToNextEntryAsync())
         {
             Assert.NotEqual(0, reader.Entry.Size);
             Assert.NotEqual(0, reader.Entry.Crc);
@@ -31,69 +32,39 @@ public class GZipReaderAsyncTests : ReaderTests
             // Use async overload for reading the entry
             if (!reader.Entry.IsDirectory)
             {
-                using var entryStream = reader.OpenEntryStream();
+                using var entryStream = await reader.OpenEntryStreamAsync();
                 using var ms = new MemoryStream();
                 await entryStream.CopyToAsync(ms);
             }
         }
     }
 
-    protected async Task ReadAsync(
-        string testArchive,
-        CompressionType expectedCompression,
-        ReaderOptions? options = null
-    )
+    [Fact]
+    public async ValueTask GZip_ReaderFactory_FlatGZip_Async()
     {
-        testArchive = Path.Combine(TEST_ARCHIVES_PATH, testArchive);
-
-        options ??= new ReaderOptions() { BufferSize = 0x20000 };
-
-        options.LeaveStreamOpen = true;
-        await ReadImplAsync(testArchive, expectedCompression, options);
-
-        options.LeaveStreamOpen = false;
-        await ReadImplAsync(testArchive, expectedCompression, options);
-        VerifyFiles();
-    }
-
-    private async Task ReadImplAsync(
-        string testArchive,
-        CompressionType expectedCompression,
-        ReaderOptions options
-    )
-    {
-        using var file = File.OpenRead(testArchive);
-        using var protectedStream = SharpCompressStream.Create(
-            new ForwardOnlyStream(file, options.BufferSize),
-            leaveOpen: true,
-            throwOnDispose: true,
-            bufferSize: options.BufferSize
-        );
-        using var testStream = new TestStream(protectedStream);
-        using (var reader = ReaderFactory.Open(testStream, options))
+        var source = new byte[2048];
+        for (var i = 0; i < source.Length; i++)
         {
-            await UseReaderAsync(reader, expectedCompression);
-            protectedStream.ThrowOnDispose = false;
-            Assert.False(testStream.IsDisposed, $"{nameof(testStream)} prematurely closed");
+            source[i] = 0xFF;
         }
 
-        var message =
-            $"{nameof(options.LeaveStreamOpen)} is set to '{options.LeaveStreamOpen}', so {nameof(testStream.IsDisposed)} should be set to '{!testStream.IsDisposed}', but is set to {testStream.IsDisposed}";
-        Assert.True(options.LeaveStreamOpen != testStream.IsDisposed, message);
-    }
-
-    private async Task UseReaderAsync(IReader reader, CompressionType expectedCompression)
-    {
-        while (reader.MoveToNextEntry())
+        var gzipPath = Path.Combine(SCRATCH_FILES_PATH, "Flat.bin.gz");
+        using (var output = File.Create(gzipPath))
+        using (var gzip = new GZipStream(output, CompressionMode.Compress))
         {
-            if (!reader.Entry.IsDirectory)
-            {
-                Assert.Equal(expectedCompression, reader.Entry.CompressionType);
-                await reader.WriteEntryToDirectoryAsync(
-                    SCRATCH_FILES_PATH,
-                    new ExtractionOptions { ExtractFullPath = true, Overwrite = true }
-                );
-            }
+            await gzip.WriteAsync(source, 0, source.Length);
         }
+
+        using Stream stream = File.OpenRead(gzipPath);
+        await using var reader = await ReaderFactory.OpenAsyncReader(stream);
+        Assert.IsType<GZipReader>(reader);
+        Assert.True(await reader.MoveToNextEntryAsync());
+
+        using var ms = new MemoryStream();
+        await reader.WriteEntryToAsync(ms);
+        Assert.Equal(source.Length, ms.Length);
+        Assert.Equal(source, ms.ToArray());
+
+        Assert.False(await reader.MoveToNextEntryAsync());
     }
 }

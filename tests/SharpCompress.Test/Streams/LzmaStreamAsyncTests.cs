@@ -2,25 +2,80 @@ using System;
 using System.Buffers;
 using System.IO;
 using System.Threading.Tasks;
+using SharpCompress.Common;
 using SharpCompress.Compressors.LZMA;
+using SharpCompress.Compressors.Xz;
+using SharpCompress.Test.Mocks;
 using Xunit;
 
 namespace SharpCompress.Test.Streams;
 
-public class LzmaStreamAsyncTests
+public class LzmaStreamAsyncTests : TestBase
 {
     [Fact]
-    public async Task TestLzma2Decompress1ByteAsync()
+    public async ValueTask TestLzma2Decompress()
+    {
+        using var stream = File.OpenRead(Path.Combine(TEST_ARCHIVES_PATH, "bad-1-lzma2-7.xz"));
+
+        using var xz = new XZStream(stream);
+        await Assert.ThrowsAnyAsync<SharpCompressException>(async () =>
+            await xz.TransferToAsync(Stream.Null, long.MaxValue)
+        );
+    }
+
+    [Fact]
+    public async ValueTask TestLzma2Decompress1ByteAsync()
     {
         var properties = new byte[] { 0x01 };
         var compressedData = new byte[] { 0x01, 0x00, 0x00, 0x58, 0x00 };
         var lzma2Stream = new MemoryStream(compressedData);
 
-        var decompressor = new LzmaStream(properties, lzma2Stream, 5, 1);
+        var decompressor = LzmaStream.Create(properties, lzma2Stream, 5, 1);
         var buffer = new byte[1];
         var bytesRead = await decompressor.ReadAsync(buffer, 0, 1).ConfigureAwait(false);
         Assert.Equal(1, bytesRead);
         Assert.Equal((byte)'X', buffer[0]);
+    }
+
+    [Fact]
+    public async Task LzmaStream_SynchronousReadThenAsynchronousRead_Throws()
+    {
+        using var stream = CreateRawLzmaStream();
+        var buffer = new byte[1];
+
+        Assert.Equal(1, stream.Read(buffer, 0, buffer.Length));
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            stream.ReadAsync(buffer, 0, buffer.Length)
+        );
+    }
+
+#if !LEGACY_DOTNET
+    [Fact]
+    public async Task LzmaStream_AsynchronousMemoryReadThenSynchronousRead_Throws()
+    {
+        using var stream = CreateRawLzmaStream();
+        var buffer = new byte[1];
+
+        Assert.Equal(1, await stream.ReadAsync(buffer.AsMemory()));
+
+        Assert.Throws<InvalidOperationException>(() => stream.Read(buffer, 0, buffer.Length));
+    }
+#endif
+
+    [Fact]
+    public async Task LzmaStream_ZeroLengthReadsDoNotSelectReadMode()
+    {
+        using var stream = CreateRawLzmaStream();
+        var empty = Array.Empty<byte>();
+
+        Assert.Equal(0, stream.Read(empty, 0, 0));
+        Assert.Equal(0, await stream.ReadAsync(empty, 0, 0));
+        Assert.Equal(1, stream.ReadByte());
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            stream.ReadAsync(new byte[1], 0, 1)
+        );
     }
 
     private static byte[] LzmaData { get; } =
@@ -517,7 +572,7 @@ public class LzmaStreamAsyncTests
     ];
 
     [Fact]
-    public async Task TestLzmaBufferAsync()
+    public async ValueTask TestLzmaBufferAsync()
     {
         var input = new MemoryStream(LzmaData);
         using var output = new MemoryStream();
@@ -536,24 +591,32 @@ public class LzmaStreamAsyncTests
     }
 
     [Fact]
-    public async Task TestLzmaStreamEncodingWritesDataAsync()
+    public async ValueTask TestLzmaStreamEncodingWritesDataAsync()
     {
         using var inputStream = new MemoryStream(LzmaResultData);
         using MemoryStream outputStream = new();
-        using var lzmaStream = new LzmaStream(LzmaEncoderProperties.Default, false, outputStream);
+        await using var lzmaStream = LzmaStream.Create(
+            LzmaEncoderProperties.Default,
+            false,
+            new AsyncOnlyStream(outputStream, disposeStream: false)
+        );
         await inputStream.CopyToAsync(lzmaStream).ConfigureAwait(false);
-        lzmaStream.Close();
+        await lzmaStream.DisposeAsync().ConfigureAwait(false);
         Assert.NotEqual(0, outputStream.Length);
     }
 
     [Fact]
-    public async Task TestLzmaEncodingAccuracyAsync()
+    public async ValueTask TestLzmaEncodingAccuracyAsync()
     {
         var input = new MemoryStream(LzmaResultData);
         var compressed = new MemoryStream();
-        var lzmaEncodingStream = new LzmaStream(LzmaEncoderProperties.Default, false, compressed);
+        var lzmaEncodingStream = LzmaStream.Create(
+            LzmaEncoderProperties.Default,
+            false,
+            new AsyncOnlyStream(compressed, disposeStream: false)
+        );
         await input.CopyToAsync(lzmaEncodingStream).ConfigureAwait(false);
-        lzmaEncodingStream.Close();
+        await lzmaEncodingStream.DisposeAsync().ConfigureAwait(false);
         compressed.Position = 0;
 
         var output = new MemoryStream();
@@ -577,7 +640,7 @@ public class LzmaStreamAsyncTests
         long decompressedSize
     )
     {
-        var lzmaStream = new LzmaStream(
+        var lzmaStream = await LzmaStream.CreateAsync(
             properties,
             compressedStream,
             compressedSize,
@@ -602,5 +665,15 @@ public class LzmaStreamAsyncTests
                 break;
             }
         }
+    }
+
+    private static LzmaStream CreateRawLzmaStream()
+    {
+        var input = new MemoryStream(LzmaData);
+        var properties = new byte[5];
+        Buffer.BlockCopy(LzmaData, 0, properties, 0, properties.Length);
+        var outputSize = BitConverter.ToInt64(LzmaData, 5);
+        input.Position = 13;
+        return LzmaStream.Create(properties, input, input.Length - input.Position, outputSize);
     }
 }

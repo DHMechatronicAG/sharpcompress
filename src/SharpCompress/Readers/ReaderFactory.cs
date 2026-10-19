@@ -7,18 +7,18 @@ using SharpCompress.IO;
 
 namespace SharpCompress.Readers;
 
-public static class ReaderFactory
+public static partial class ReaderFactory
 {
-    public static IReader Open(string filePath, ReaderOptions? options = null)
+    public static IReader OpenReader(string filePath, ReaderOptions? options = null)
     {
         filePath.NotNullOrEmpty(nameof(filePath));
-        return Open(new FileInfo(filePath), options);
+        return OpenReader(new FileInfo(filePath), options ?? ReaderOptions.ForFilePath);
     }
 
-    public static IReader Open(FileInfo fileInfo, ReaderOptions? options = null)
+    public static IReader OpenReader(FileInfo fileInfo, ReaderOptions? options = null)
     {
-        options ??= new ReaderOptions { LeaveStreamOpen = false };
-        return Open(fileInfo.OpenRead(), options);
+        options ??= ReaderOptions.ForFilePath;
+        return OpenReader(fileInfo.OpenRead(), options);
     }
 
     /// <summary>
@@ -27,14 +27,23 @@ public static class ReaderFactory
     /// <param name="stream"></param>
     /// <param name="options"></param>
     /// <returns></returns>
-    public static IReader Open(Stream stream, ReaderOptions? options = null)
+    public static IReader OpenReader(Stream stream, ReaderOptions? options = null)
     {
-        stream.NotNull(nameof(stream));
-        options ??= new ReaderOptions() { LeaveStreamOpen = false };
+        stream.RequireReadable();
+        options ??= ReaderOptions.ForExternalStream;
 
-        var bStream = new SharpCompressStream(stream, bufferSize: options.BufferSize);
+        if (options.LeaveStreamOpen)
+        {
+            // Protect the caller's stream, not the internal wrappers and their pooled buffers.
+            stream = SharpCompressStream.CreateNonDisposing(stream);
+            options = options with { LeaveStreamOpen = false };
+        }
 
-        long pos = ((IStreamStack)bStream).GetPosition();
+        var sharpCompressStream = SharpCompressStream.Create(
+            stream,
+            bufferSize: options.RewindableBufferSize
+        );
+        sharpCompressStream.StartRecording();
 
         var factories = Factories.Factory.Factories.OfType<Factories.Factory>();
 
@@ -47,13 +56,13 @@ public static class ReaderFactory
                     .Contains(options.ExtensionHint, StringComparer.CurrentCultureIgnoreCase)
             );
             if (
-                testedFactory?.TryOpenReader(bStream, options, out var reader) == true
+                testedFactory?.TryOpenReader(sharpCompressStream, options, out var reader) == true
                 && reader != null
             )
             {
+                sharpCompressStream.Rewind(true);
                 return reader;
             }
-            ((IStreamStack)bStream).StackSeek(pos);
         }
 
         foreach (var factory in factories)
@@ -62,15 +71,18 @@ public static class ReaderFactory
             {
                 continue; // Already tested above
             }
-            ((IStreamStack)bStream).StackSeek(pos);
-            if (factory.TryOpenReader(bStream, options, out var reader) && reader != null)
+            sharpCompressStream.Rewind();
+            if (
+                factory.TryOpenReader(sharpCompressStream, options, out var reader)
+                && reader != null
+            )
             {
                 return reader;
             }
         }
 
         throw new InvalidFormatException(
-            "Cannot determine compressed stream type.  Supported Reader Formats: Ace, Arc, Arj, Zip, GZip, BZip2, Tar, Rar, LZip, XZ, ZStandard"
+            "Cannot determine compressed stream type.  Supported Reader Formats: Ace, Arc, Arj, Zip, GZip, BZip2, Tar, Rar, LZip, Lzw, XZ, ZStandard"
         );
     }
 }

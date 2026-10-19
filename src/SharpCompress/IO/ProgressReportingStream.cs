@@ -1,7 +1,5 @@
 using System;
 using System.IO;
-using System.Threading;
-using System.Threading.Tasks;
 using SharpCompress.Common;
 
 namespace SharpCompress.IO;
@@ -10,7 +8,7 @@ namespace SharpCompress.IO;
 /// A stream wrapper that reports progress as data is read from the source.
 /// Used to track compression or extraction progress by wrapping the source stream.
 /// </summary>
-internal sealed class ProgressReportingStream : Stream
+internal sealed partial class ProgressReportingStream : AsyncDisposableStream
 {
     private readonly Stream _baseStream;
     private readonly IProgress<ProgressReport> _progress;
@@ -53,66 +51,6 @@ internal sealed class ProgressReportingStream : Stream
 
     public override void Flush() => _baseStream.Flush();
 
-    public override int Read(byte[] buffer, int offset, int count)
-    {
-        var bytesRead = _baseStream.Read(buffer, offset, count);
-        if (bytesRead > 0)
-        {
-            _bytesTransferred += bytesRead;
-            ReportProgress();
-        }
-        return bytesRead;
-    }
-
-#if !NETFRAMEWORK && !NETSTANDARD2_0
-    public override int Read(Span<byte> buffer)
-    {
-        var bytesRead = _baseStream.Read(buffer);
-        if (bytesRead > 0)
-        {
-            _bytesTransferred += bytesRead;
-            ReportProgress();
-        }
-        return bytesRead;
-    }
-#endif
-
-    public override async Task<int> ReadAsync(
-        byte[] buffer,
-        int offset,
-        int count,
-        CancellationToken cancellationToken
-    )
-    {
-        var bytesRead = await _baseStream
-            .ReadAsync(buffer, offset, count, cancellationToken)
-            .ConfigureAwait(false);
-        if (bytesRead > 0)
-        {
-            _bytesTransferred += bytesRead;
-            ReportProgress();
-        }
-        return bytesRead;
-    }
-
-#if !NETFRAMEWORK && !NETSTANDARD2_0
-    public override async ValueTask<int> ReadAsync(
-        Memory<byte> buffer,
-        CancellationToken cancellationToken = default
-    )
-    {
-        var bytesRead = await _baseStream
-            .ReadAsync(buffer, cancellationToken)
-            .ConfigureAwait(false);
-        if (bytesRead > 0)
-        {
-            _bytesTransferred += bytesRead;
-            ReportProgress();
-        }
-        return bytesRead;
-    }
-#endif
-
     public override int ReadByte()
     {
         var value = _baseStream.ReadByte();
@@ -146,15 +84,4 @@ internal sealed class ProgressReportingStream : Stream
         }
         base.Dispose(disposing);
     }
-
-#if !NETFRAMEWORK && !NETSTANDARD2_0
-    public override async ValueTask DisposeAsync()
-    {
-        if (!_leaveOpen)
-        {
-            await _baseStream.DisposeAsync().ConfigureAwait(false);
-        }
-        await base.DisposeAsync().ConfigureAwait(false);
-    }
-#endif
 }

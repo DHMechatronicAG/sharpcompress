@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text;
+using System.Threading;
 using System.Threading.Tasks;
 using SharpCompress.Archives;
 using SharpCompress.Compressors.ZStandard;
@@ -20,9 +21,12 @@ internal class ZStandardFactory : Factory
         yield return "zstd";
     }
 
-    public override bool IsArchive(
+    public override bool IsArchive(Stream stream, ReaderOptions readerOptions) =>
+        ZStandardStream.IsZStandard(stream);
+
+    public override ValueTask<bool> IsArchiveAsync(
         Stream stream,
-        string? password = null,
-        int bufferSize = 65536
-    ) => ZStandardStream.IsZStandard(stream);
+        ReaderOptions readerOptions,
+        CancellationToken cancellationToken = default
+    ) => ZStandardStream.IsZStandardAsync(stream, cancellationToken);
 }

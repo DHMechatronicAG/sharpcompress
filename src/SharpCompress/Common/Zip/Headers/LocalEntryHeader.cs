@@ -3,7 +3,7 @@ using System.Linq;
 
 namespace SharpCompress.Common.Zip.Headers;
 
-internal class LocalEntryHeader : ZipFileEntry
+internal partial class LocalEntryHeader : ZipFileEntry
 {
     public LocalEntryHeader(IArchiveEncoding archiveEncoding)
         : base(ZipHeaderType.LocalEntry, archiveEncoding) { }
@@ -16,6 +16,7 @@ internal class LocalEntryHeader : ZipFileEntry
         OriginalLastModifiedTime = LastModifiedTime = reader.ReadUInt16();
         OriginalLastModifiedDate = LastModifiedDate = reader.ReadUInt16();
         Crc = reader.ReadUInt32();
+        IsCrcAvailable = !Flags.HasFlag(HeaderFlags.UsePostDataDescriptor);
         CompressedSize = reader.ReadUInt32();
         UncompressedSize = reader.ReadUInt32();
         var nameLength = reader.ReadUInt16();
@@ -23,7 +24,11 @@ internal class LocalEntryHeader : ZipFileEntry
         var name = reader.ReadBytes(nameLength);
         var extra = reader.ReadBytes(extraLength);
 
-        // According to .ZIP File Format Specification
+        ProcessReadData(name, extra);
+    }
+
+    private void ProcessReadData(byte[] name, byte[] extra)
+    {
         //
         // For example: https://pkware.cachefly.net/webdocs/casestudies/APPNOTE.TXT
         //

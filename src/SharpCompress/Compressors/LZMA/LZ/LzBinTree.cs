@@ -1,18 +1,26 @@
 #nullable disable
 
 using System;
+using System.Buffers;
 using System.IO;
 
 namespace SharpCompress.Compressors.LZMA.LZ;
 
 internal sealed class BinTree : InWindow
 {
+    private readonly ArrayPool<uint> _pool;
+
+    public BinTree()
+        : this(ArrayPool<uint>.Shared) { }
+
+    internal BinTree(ArrayPool<uint> pool) => _pool = pool;
+
     private uint _cyclicBufferPos;
     private uint _cyclicBufferSize;
     private uint _matchMaxLen;
 
-    private uint[] _son;
-    private uint[] _hash;
+    private uint[] _son = [];
+    private uint[] _hash = [];
 
     private uint _cutValue = 0xFF;
     private uint _hashMask;
@@ -91,10 +99,7 @@ internal sealed class BinTree : InWindow
         uint keepAddBufferAfter
     )
     {
-        if (historySize > K_MAX_VAL_FOR_NORMALIZE - 256)
-        {
-            throw new ArgumentOutOfRangeException(nameof(historySize));
-        }
+        ThrowHelper.ThrowIfGreaterThan(historySize, K_MAX_VAL_FOR_NORMALIZE - 256);
         _cutValue = 16 + (matchMaxLen >> 1);
 
         var windowReservSize =
@@ -111,7 +116,13 @@ internal sealed class BinTree : InWindow
         var cyclicBufferSize = historySize + 1;
         if (_cyclicBufferSize != cyclicBufferSize)
         {
-            _son = new uint[(_cyclicBufferSize = cyclicBufferSize) * 2];
+            var replacement = _pool.Rent(checked((int)(cyclicBufferSize * 2)));
+            if (_son.Length != 0)
+            {
+                _pool.Return(_son);
+            }
+            _cyclicBufferSize = cyclicBufferSize;
+            _son = replacement;
         }
 
         var hs = K_BT2_HASH_SIZE;
@@ -135,7 +146,28 @@ internal sealed class BinTree : InWindow
         }
         if (hs != _hashSizeSum)
         {
-            _hash = new uint[_hashSizeSum = hs];
+            var replacement = _pool.Rent(checked((int)hs));
+            if (_hash.Length != 0)
+            {
+                _pool.Return(_hash);
+            }
+            _hashSizeSum = hs;
+            _hash = replacement;
+        }
+    }
+
+    public override void Dispose()
+    {
+        base.Dispose();
+        if (_son.Length != 0)
+        {
+            _pool.Return(_son);
+            _son = [];
+        }
+        if (_hash.Length != 0)
+        {
+            _pool.Return(_hash);
+            _hash = [];
         }
     }
 

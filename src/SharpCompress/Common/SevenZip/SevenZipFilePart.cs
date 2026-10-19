@@ -1,5 +1,7 @@
 using System.IO;
 using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
 using SharpCompress.IO;
 
 namespace SharpCompress.Common.SevenZip;
@@ -9,18 +11,21 @@ internal class SevenZipFilePart : FilePart
     private CompressionType? _type;
     private readonly Stream _stream;
     private readonly ArchiveDatabase _database;
+    private readonly bool _enableParallelism;
 
     internal SevenZipFilePart(
         Stream stream,
         ArchiveDatabase database,
         int index,
         CFileItem fileEntry,
-        IArchiveEncoding archiveEncoding
+        IArchiveEncoding archiveEncoding,
+        bool enableParallelism = false
     )
         : base(archiveEncoding)
     {
         _stream = stream;
         _database = database;
+        _enableParallelism = enableParallelism;
         Index = index;
         Header = fileEntry;
         if (Header.HasStream)
@@ -42,7 +47,6 @@ internal class SevenZipFilePart : FilePart
         {
             return Stream.Null;
         }
-        var folderStream = _database.GetFolderStream(_stream, Folder!, _database.PasswordProvider);
 
         var firstFileIndex = _database._folderStartFileIndex[_database._folders.IndexOf(Folder!)];
         var skipCount = Index - firstFileIndex;
@@ -51,11 +55,46 @@ internal class SevenZipFilePart : FilePart
         {
             skipSize += _database._files[firstFileIndex + i].Size;
         }
-        if (skipSize > 0)
+
+        var folderStream = _database.GetFolderStream(
+            _stream,
+            Folder!,
+            _database.PasswordProvider,
+            skipSize,
+            Header.Size,
+            _enableParallelism
+        );
+        return new ReadOnlySubStream(folderStream, Header.Size, leaveOpen: true);
+    }
+
+    internal override async ValueTask<Stream?> GetCompressedStreamAsync(
+        CancellationToken cancellationToken = default
+    )
+    {
+        if (!Header.HasStream)
         {
-            folderStream.Skip(skipSize);
+            return Stream.Null;
         }
-        return new ReadOnlySubStream(folderStream, Header.Size, leaveOpen: false);
+
+        var firstFileIndex = _database._folderStartFileIndex[_database._folders.IndexOf(Folder!)];
+        var skipCount = Index - firstFileIndex;
+        long skipSize = 0;
+        for (var i = 0; i < skipCount; i++)
+        {
+            skipSize += _database._files[firstFileIndex + i].Size;
+        }
+
+        var folderStream = await _database
+            .GetFolderStreamAsync(
+                _stream,
+                Folder!,
+                _database.PasswordProvider,
+                skipSize,
+                Header.Size,
+                cancellationToken
+            )
+            .ConfigureAwait(false);
+        return new ReadOnlySubStream(folderStream, Header.Size, leaveOpen: true);
     }
 
     public CompressionType CompressionType
@@ -91,7 +130,5 @@ internal class SevenZipFilePart : FilePart
         };
     }
 
-    internal bool IsEncrypted =>
-        !Header.IsDir
-        && Folder?._coders.FindIndex(c => c._methodId._id == CMethodId.K_AES_ID) != -1;
+    internal bool IsEncrypted => !Header.IsDir && Folder?.IsEncrypted() == true;
 }

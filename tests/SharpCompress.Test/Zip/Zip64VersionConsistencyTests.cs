@@ -31,13 +31,13 @@ public class Zip64VersionConsistencyTests : WriterTests
         }
 
         // Create archive with UseZip64=true
-        WriterOptions writerOptions = new ZipWriterOptions(CompressionType.Deflate)
+        var writerOptions = new ZipWriterOptions(CompressionType.Deflate)
         {
             LeaveStreamOpen = false,
             UseZip64 = true,
         };
 
-        ZipArchive zipArchive = ZipArchive.Create();
+        var zipArchive = ZipArchive.CreateArchive();
         zipArchive.AddEntry("empty", new MemoryStream());
         zipArchive.SaveTo(filename, writerOptions);
 
@@ -135,13 +135,13 @@ public class Zip64VersionConsistencyTests : WriterTests
         }
 
         // Create archive without UseZip64
-        WriterOptions writerOptions = new ZipWriterOptions(CompressionType.Deflate)
+        var writerOptions = new ZipWriterOptions(CompressionType.Deflate)
         {
             LeaveStreamOpen = false,
             UseZip64 = false,
         };
 
-        ZipArchive zipArchive = ZipArchive.Create();
+        var zipArchive = ZipArchive.CreateArchive();
         zipArchive.AddEntry("empty", new MemoryStream());
         zipArchive.SaveTo(filename, writerOptions);
 
@@ -186,13 +186,13 @@ public class Zip64VersionConsistencyTests : WriterTests
             File.Delete(filename);
         }
 
-        WriterOptions writerOptions = new ZipWriterOptions(CompressionType.LZMA)
+        var writerOptions = new ZipWriterOptions(CompressionType.LZMA)
         {
             LeaveStreamOpen = false,
             UseZip64 = false,
         };
 
-        ZipArchive zipArchive = ZipArchive.Create();
+        var zipArchive = ZipArchive.CreateArchive();
         var data = new byte[100];
         new Random(42).NextBytes(data);
         zipArchive.AddEntry("test.bin", new MemoryStream(data));
@@ -239,13 +239,13 @@ public class Zip64VersionConsistencyTests : WriterTests
             File.Delete(filename);
         }
 
-        WriterOptions writerOptions = new ZipWriterOptions(CompressionType.PPMd)
+        var writerOptions = new ZipWriterOptions(CompressionType.PPMd)
         {
             LeaveStreamOpen = false,
             UseZip64 = false,
         };
 
-        ZipArchive zipArchive = ZipArchive.Create();
+        var zipArchive = ZipArchive.CreateArchive();
         var data = new byte[100];
         new Random(42).NextBytes(data);
         zipArchive.AddEntry("test.bin", new MemoryStream(data));
@@ -292,13 +292,13 @@ public class Zip64VersionConsistencyTests : WriterTests
             File.Delete(filename);
         }
 
-        WriterOptions writerOptions = new ZipWriterOptions(CompressionType.Deflate)
+        var writerOptions = new ZipWriterOptions(CompressionType.Deflate)
         {
             LeaveStreamOpen = false,
             UseZip64 = true,
         };
 
-        ZipArchive zipArchive = ZipArchive.Create();
+        var zipArchive = ZipArchive.CreateArchive();
         for (int i = 0; i < 5; i++)
         {
             var data = new byte[100];

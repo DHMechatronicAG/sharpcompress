@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
@@ -9,6 +8,7 @@ using SharpCompress.Common;
 using SharpCompress.Compressors.Deflate;
 using SharpCompress.Compressors.Xz;
 using SharpCompress.Crypto;
+using SharpCompress.Test.Mocks;
 using SharpCompress.Writers;
 using SharpCompress.Writers.Zip;
 using Xunit;
@@ -36,7 +36,7 @@ public class ZipTypesLevelsWithCrcRatioAsyncTests : ArchiveTests
     [InlineData(CompressionType.BZip2, 0, 2, 0.035f)] // was 0.8f, actual 0.032
     [InlineData(CompressionType.Deflate, 9, 3, 0.04f)] // was 0.7f, actual 0.038
     [InlineData(CompressionType.ZStandard, 9, 3, 0.003f)] // was 0.7f, actual 0.002
-    public async Task Zip_Create_Archive_With_3_Files_Crc32_Test_Async(
+    public async ValueTask Zip_Create_Archive_With_3_Files_Crc32_Test_Async(
         CompressionType compressionType,
         int compressionLevel,
         int sizeMb,
@@ -60,7 +60,13 @@ public class ZipTypesLevelsWithCrcRatioAsyncTests : ArchiveTests
 
         // Create zip archive in memory
         using var zipStream = new MemoryStream();
-        using (var writer = CreateWriterWithLevel(zipStream, compressionType, compressionLevel))
+        await using (
+            var writer = await CreateWriterWithLevelAsync(
+                zipStream,
+                compressionType,
+                compressionLevel
+            )
+        )
         {
             await writer.WriteAsync($"file1_{sizeMb}MiB.txt", new MemoryStream(file1Data));
             await writer.WriteAsync($"data/file2_{sizeMb * 2}MiB.txt", new MemoryStream(file2Data));
@@ -73,7 +79,6 @@ public class ZipTypesLevelsWithCrcRatioAsyncTests : ArchiveTests
         // Calculate and output actual compression ratio
         var originalSize = file1Data.Length + file2Data.Length + file3Data.Length;
         var actualRatio = (double)zipStream.Length / originalSize;
-        //Debug.WriteLine($"Zip_Create_Archive_With_3_Files_Crc32_Test_Async: {compressionType} Level={compressionLevel} Size={sizeMb}MB Expected={expectedRatio:F3} Actual={actualRatio:F3}");
 
         // Verify compression occurred (except for None compression type)
         if (compressionType != CompressionType.None)
@@ -110,7 +115,7 @@ public class ZipTypesLevelsWithCrcRatioAsyncTests : ArchiveTests
     [InlineData(CompressionType.ZStandard, 22, 4, 0.003f)] // was 0.8, actual 0.002
     [InlineData(CompressionType.BZip2, 0, 4, 0.035f)] // was 0.8, actual 0.032
     [InlineData(CompressionType.LZMA, 0, 4, 0.003f)] // was 0.8, actual 0.002
-    public async Task Zip_WriterFactory_Crc32_Test_Async(
+    public async ValueTask Zip_WriterFactory_Crc32_Test_Async(
         CompressionType compressionType,
         int compressionLevel,
         int sizeMb,
@@ -129,7 +134,13 @@ public class ZipTypesLevelsWithCrcRatioAsyncTests : ArchiveTests
             CompressionLevel = compressionLevel,
         };
 
-        using (var writer = WriterFactory.Open(zipStream, ArchiveType.Zip, writerOptions))
+        await using (
+            var writer = await WriterFactory.OpenAsyncWriter(
+                new AsyncOnlyStream(zipStream),
+                ArchiveType.Zip,
+                writerOptions
+            )
+        )
         {
             await writer.WriteAsync(
                 $"{compressionType}_level_{compressionLevel}_{sizeMb}MiB.txt",
@@ -139,7 +150,6 @@ public class ZipTypesLevelsWithCrcRatioAsyncTests : ArchiveTests
 
         // Calculate and output actual compression ratio
         var actualRatio = (double)zipStream.Length / testData.Length;
-        //Debug.WriteLine($"Zip_WriterFactory_Crc32_Test_Async: {compressionType} Level={compressionLevel} Size={sizeMb}MB Expected={expectedRatio:F3} Actual={actualRatio:F3}");
 
         VerifyCompressionRatio(
             testData.Length,
@@ -150,10 +160,10 @@ public class ZipTypesLevelsWithCrcRatioAsyncTests : ArchiveTests
 
         // Verify the archive
         zipStream.Position = 0;
-        using var archive = ZipArchive.Open(zipStream);
+        using var archive = ZipArchive.OpenArchive(zipStream);
 
         var entry = archive.Entries.Single(e => !e.IsDirectory);
-        using var entryStream = entry.OpenEntryStream();
+        using var entryStream = await entry.OpenEntryStreamAsync();
         using var extractedStream = new MemoryStream();
         await entryStream.CopyToAsync(extractedStream);
 
@@ -177,7 +187,7 @@ public class ZipTypesLevelsWithCrcRatioAsyncTests : ArchiveTests
     [InlineData(CompressionType.ZStandard, 22, 2, 0.005f)] // was 0.7, actual 0.004
     [InlineData(CompressionType.BZip2, 0, 2, 0.035f)] // was 0.8, actual 0.032
     [InlineData(CompressionType.LZMA, 0, 2, 0.005f)] // was 0.8, actual 0.004
-    public async Task Zip_ZipArchiveOpen_Crc32_Test_Async(
+    public async ValueTask Zip_ZipArchiveOpen_Crc32_Test_Async(
         CompressionType compressionType,
         int compressionLevel,
         int sizeMb,
@@ -191,7 +201,13 @@ public class ZipTypesLevelsWithCrcRatioAsyncTests : ArchiveTests
 
         // Create archive with specified compression and level
         using var zipStream = new MemoryStream();
-        using (var writer = CreateWriterWithLevel(zipStream, compressionType, compressionLevel))
+        await using (
+            var writer = await CreateWriterWithLevelAsync(
+                zipStream,
+                compressionType,
+                compressionLevel
+            )
+        )
         {
             await writer.WriteAsync(
                 $"{compressionType}_{compressionLevel}_{sizeMb}MiB.txt",
@@ -201,14 +217,13 @@ public class ZipTypesLevelsWithCrcRatioAsyncTests : ArchiveTests
 
         // Calculate and output actual compression ratio
         var actualRatio = (double)zipStream.Length / testData.Length;
-        //Debug.WriteLine($"Zip_ZipArchiveOpen_Crc32_Test_Async: {compressionType} Level={compressionLevel} Size={sizeMb}MB Expected={expectedRatio:F3} Actual={actualRatio:F3}");
 
         // Verify the archive
         zipStream.Position = 0;
-        using var archive = ZipArchive.Open(zipStream);
+        using var archive = ZipArchive.OpenArchive(zipStream);
 
         var entry = archive.Entries.Single(e => !e.IsDirectory);
-        using var entryStream = entry.OpenEntryStream();
+        using var entryStream = await entry.OpenEntryStreamAsync();
         using var extractedStream = new MemoryStream();
         await entryStream.CopyToAsync(extractedStream);
 
@@ -238,13 +253,13 @@ public class ZipTypesLevelsWithCrcRatioAsyncTests : ArchiveTests
     }
 
     // Helper method for async archive content verification
-    private async Task VerifyArchiveContentAsync(
+    private async ValueTask VerifyArchiveContentAsync(
         MemoryStream zipStream,
         Dictionary<string, (byte[] data, uint crc)> expectedFiles
     )
     {
         zipStream.Position = 0;
-        using var archive = ZipArchive.Open(zipStream);
+        using var archive = ZipArchive.OpenArchive(zipStream);
 
         foreach (var entry in archive.Entries.Where(e => !e.IsDirectory))
         {
@@ -254,7 +269,7 @@ public class ZipTypesLevelsWithCrcRatioAsyncTests : ArchiveTests
             );
 
             var expected = expectedFiles[entry.Key!];
-            using var entryStream = entry.OpenEntryStream();
+            using var entryStream = await entry.OpenEntryStreamAsync();
             using var extractedStream = new MemoryStream();
             await entryStream.CopyToAsync(extractedStream);
 

@@ -4,11 +4,13 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using SharpCompress.Archives;
+using SharpCompress.Archives.GZip;
 using SharpCompress.Archives.Zip;
 using SharpCompress.Common;
 using SharpCompress.Compressors;
 using SharpCompress.Compressors.Deflate;
 using SharpCompress.Readers;
+using SharpCompress.Test.Mocks;
 using SharpCompress.Writers;
 using Xunit;
 
@@ -17,7 +19,7 @@ namespace SharpCompress.Test.GZip;
 public class AsyncTests : TestBase
 {
     [Fact]
-    public async Task Reader_Async_Extract_All()
+    public async ValueTask Reader_Async_Extract_All()
     {
         var testArchive = Path.Combine(TEST_ARCHIVES_PATH, "Tar.tar.gz");
 #if NETFRAMEWORK
@@ -25,12 +27,9 @@ public class AsyncTests : TestBase
 #else
         await using var stream = File.OpenRead(testArchive);
 #endif
-        using var reader = ReaderFactory.Open(stream);
+        await using var reader = await ReaderFactory.OpenAsyncReader(new AsyncOnlyStream(stream));
 
-        await reader.WriteAllToDirectoryAsync(
-            SCRATCH_FILES_PATH,
-            new ExtractionOptions { ExtractFullPath = true, Overwrite = true }
-        );
+        await reader.WriteAllToDirectoryAsync(SCRATCH_FILES_PATH);
 
         // Just verify some files were extracted
         var extractedFiles = Directory.GetFiles(
@@ -42,7 +41,7 @@ public class AsyncTests : TestBase
     }
 
     [Fact]
-    public async Task Reader_Async_Extract_Single_Entry()
+    public async ValueTask Reader_Async_Extract_Single_Entry()
     {
         var testArchive = Path.Combine(TEST_ARCHIVES_PATH, "Tar.tar.gz");
 #if NETFRAMEWORK
@@ -50,9 +49,9 @@ public class AsyncTests : TestBase
 #else
         await using var stream = File.OpenRead(testArchive);
 #endif
-        using var reader = ReaderFactory.Open(stream);
+        await using var reader = await ReaderFactory.OpenAsyncReader(new AsyncOnlyStream(stream));
 
-        while (reader.MoveToNextEntry())
+        while (await reader.MoveToNextEntryAsync())
         {
             if (!reader.Entry.IsDirectory)
             {
@@ -70,12 +69,14 @@ public class AsyncTests : TestBase
     }
 
     [Fact]
-    public async Task Archive_Entry_Async_Open_Stream()
+    public async ValueTask Archive_Entry_Async_Open_Stream()
     {
         var testArchive = Path.Combine(TEST_ARCHIVES_PATH, "Tar.tar.gz");
-        using var archive = ArchiveFactory.Open(testArchive);
+        await using var archive = await GZipArchive.OpenAsyncArchive(
+            new AsyncOnlyStream(File.OpenRead(testArchive))
+        );
 
-        foreach (var entry in archive.Entries.Where(e => !e.IsDirectory).Take(1))
+        await foreach (var entry in archive.EntriesAsync.Where(e => !e.IsDirectory).Take(1))
         {
 #if NETFRAMEWORK
             using var entryStream = await entry.OpenEntryStreamAsync();
@@ -93,38 +94,57 @@ public class AsyncTests : TestBase
     }
 
     [Fact]
-    public async Task Writer_Async_Write_Single_File()
+    public async ValueTask Writer_Async_Write_Single_File()
     {
         var outputPath = Path.Combine(SCRATCH_FILES_PATH, "async_test.zip");
+
+#if NETFRAMEWORK
         using (var stream = File.Create(outputPath))
-        using (var writer = WriterFactory.Open(stream, ArchiveType.Zip, CompressionType.Deflate))
+#else
+        await using (var stream = File.Create(outputPath))
+#endif
+        await using (
+            var writer = await WriterFactory.OpenAsyncWriter(
+                new AsyncOnlyStream(stream),
+                ArchiveType.Zip,
+                new WriterOptions(CompressionType.Deflate) { LeaveStreamOpen = false }
+            )
+        )
         {
             var testFile = Path.Combine(TEST_ARCHIVES_PATH, "Tar.tar.gz");
+
+#if NETFRAMEWORK
             using var fileStream = File.OpenRead(testFile);
+#else
+            await using var fileStream = File.OpenRead(testFile);
+#endif
             await writer.WriteAsync("test_entry.bin", fileStream, new DateTime(2023, 1, 1));
         }
 
         // Verify the archive was created and contains the entry
         Assert.True(File.Exists(outputPath));
-        using var archive = ZipArchive.Open(outputPath);
-        Assert.Single(archive.Entries.Where(e => !e.IsDirectory));
+        await using var archive = await ZipArchive.OpenAsyncArchive(outputPath);
+        Assert.Single(await archive.EntriesAsync.Where(e => !e.IsDirectory).ToListAsync());
     }
 
     [Fact]
-    public async Task Async_With_Cancellation_Token()
+    public async ValueTask Async_With_Cancellation_Token()
     {
         using var cts = new CancellationTokenSource();
         cts.CancelAfter(10000); // 10 seconds should be plenty
 
         var testArchive = Path.Combine(TEST_ARCHIVES_PATH, "Tar.tar.gz");
+#if NETFRAMEWORK
         using var stream = File.OpenRead(testArchive);
-        using var reader = ReaderFactory.Open(stream);
-
-        await reader.WriteAllToDirectoryAsync(
-            SCRATCH_FILES_PATH,
-            new ExtractionOptions { ExtractFullPath = true, Overwrite = true },
-            cts.Token
+#else
+        await using var stream = File.OpenRead(testArchive);
+#endif
+        await using var reader = await ReaderFactory.OpenAsyncReader(
+            new AsyncOnlyStream(stream),
+            cancellationToken: cts.Token
         );
+
+        await reader.WriteAllToDirectoryAsync(SCRATCH_FILES_PATH, cancellationToken: cts.Token);
 
         // Just verify some files were extracted
         var extractedFiles = Directory.GetFiles(
@@ -136,12 +156,17 @@ public class AsyncTests : TestBase
     }
 
     [Fact]
-    public async Task Stream_Extensions_Async()
+    public async ValueTask Stream_Extensions_Async()
     {
         var testFile = Path.Combine(TEST_ARCHIVES_PATH, "Tar.tar.gz");
-        using var inputStream = File.OpenRead(testFile);
         var outputPath = Path.Combine(SCRATCH_FILES_PATH, "async_copy.bin");
+#if NETFRAMEWORK
+        using var inputStream = File.OpenRead(testFile);
         using var outputStream = File.Create(outputPath);
+#else
+        await using var inputStream = File.OpenRead(testFile);
+        await using var outputStream = File.Create(outputPath);
+#endif
 
         // Test the async extension method
         var buffer = new byte[8192];
@@ -156,17 +181,25 @@ public class AsyncTests : TestBase
     }
 
     [Fact]
-    public async Task EntryStream_ReadAsync_Works()
+    public async ValueTask EntryStream_ReadAsync_Works()
     {
         var testArchive = Path.Combine(TEST_ARCHIVES_PATH, "Tar.tar.gz");
+#if NETFRAMEWORK
         using var stream = File.OpenRead(testArchive);
-        using var reader = ReaderFactory.Open(stream);
+#else
+        await using var stream = File.OpenRead(testArchive);
+#endif
+        await using var reader = await ReaderFactory.OpenAsyncReader(new AsyncOnlyStream(stream));
 
-        while (reader.MoveToNextEntry())
+        while (await reader.MoveToNextEntryAsync())
         {
             if (!reader.Entry.IsDirectory)
             {
-                using var entryStream = reader.OpenEntryStream();
+#if NETFRAMEWORK
+                using var entryStream = await reader.OpenEntryStreamAsync();
+#else
+                await using var entryStream = await reader.OpenEntryStreamAsync();
+#endif
                 var buffer = new byte[4096];
                 var totalRead = 0;
                 int bytesRead;
@@ -184,7 +217,7 @@ public class AsyncTests : TestBase
     }
 
     [Fact]
-    public async Task CompressionStream_Async_ReadWrite()
+    public async ValueTask CompressionStream_Async_ReadWrite()
     {
         var testData = new byte[1024];
         new Random(42).NextBytes(testData);
@@ -192,8 +225,13 @@ public class AsyncTests : TestBase
         var compressedPath = Path.Combine(SCRATCH_FILES_PATH, "async_compressed.gz");
 
         // Test async write with GZipStream
+#if NETFRAMEWORK
         using (var fileStream = File.Create(compressedPath))
         using (var gzipStream = new GZipStream(fileStream, CompressionMode.Compress))
+#else
+        await using (var fileStream = File.Create(compressedPath))
+        await using (var gzipStream = new GZipStream(fileStream, CompressionMode.Compress))
+#endif
         {
             await gzipStream.WriteAsync(testData, 0, testData.Length);
             await gzipStream.FlushAsync();
@@ -201,10 +239,14 @@ public class AsyncTests : TestBase
 
         Assert.True(File.Exists(compressedPath));
         Assert.True(new FileInfo(compressedPath).Length > 0);
-
-        // Test async read with GZipStream
+#if NETFRAMEWORK
         using (var fileStream = File.OpenRead(compressedPath))
         using (var gzipStream = new GZipStream(fileStream, CompressionMode.Decompress))
+#else
+        // Test async read with GZipStream
+        await using (var fileStream = File.OpenRead(compressedPath))
+        await using (var gzipStream = new GZipStream(fileStream, CompressionMode.Decompress))
+#endif
         {
             var decompressed = new byte[testData.Length];
             var totalRead = 0;

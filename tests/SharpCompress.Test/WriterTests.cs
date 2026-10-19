@@ -5,6 +5,7 @@ using System.Threading.Tasks;
 using SharpCompress.Common;
 using SharpCompress.IO;
 using SharpCompress.Readers;
+using SharpCompress.Test.Mocks;
 using SharpCompress.Writers;
 
 namespace SharpCompress.Test;
@@ -28,7 +29,7 @@ public class WriterTests : TestBase
 
             writerOptions.ArchiveEncoding.Default = encoding ?? Encoding.Default;
 
-            using var writer = WriterFactory.Open(stream, _type, writerOptions);
+            using var writer = WriterFactory.OpenWriter(stream, _type, writerOptions);
             writer.WriteAll(ORIGINAL_FILES_PATH, "*", SearchOption.AllDirectories);
         }
         CompareArchivesByPath(
@@ -38,18 +39,15 @@ public class WriterTests : TestBase
 
         using (Stream stream = File.OpenRead(Path.Combine(SCRATCH2_FILES_PATH, archive)))
         {
-            var readerOptions = new ReaderOptions();
+            var readerOptions = ReaderOptions.ForExternalStream;
 
             readerOptions.ArchiveEncoding.Default = encoding ?? Encoding.Default;
 
-            using var reader = ReaderFactory.Open(
-                SharpCompressStream.Create(stream, leaveOpen: true),
+            using var reader = ReaderFactory.OpenReader(
+                SharpCompressStream.CreateNonDisposing(stream),
                 readerOptions
             );
-            reader.WriteAllToDirectory(
-                SCRATCH_FILES_PATH,
-                new ExtractionOptions { ExtractFullPath = true }
-            );
+            reader.WriteAllToDirectory(SCRATCH_FILES_PATH);
         }
         VerifyFiles();
     }
@@ -62,13 +60,22 @@ public class WriterTests : TestBase
         CancellationToken cancellationToken = default
     )
     {
-        using (Stream stream = File.OpenWrite(Path.Combine(SCRATCH2_FILES_PATH, archive)))
+        using (
+            Stream stream = new AsyncOnlyStream(
+                File.OpenWrite(Path.Combine(SCRATCH2_FILES_PATH, archive))
+            )
+        )
         {
             var writerOptions = new WriterOptions(compressionType) { LeaveStreamOpen = true };
 
             writerOptions.ArchiveEncoding.Default = encoding ?? Encoding.Default;
 
-            using var writer = WriterFactory.Open(stream, _type, writerOptions);
+            await using var writer = await WriterFactory.OpenAsyncWriter(
+                stream,
+                _type,
+                writerOptions,
+                cancellationToken
+            );
             await writer.WriteAllAsync(
                 ORIGINAL_FILES_PATH,
                 "*",
@@ -83,17 +90,18 @@ public class WriterTests : TestBase
 
         using (Stream stream = File.OpenRead(Path.Combine(SCRATCH2_FILES_PATH, archive)))
         {
-            var readerOptions = new ReaderOptions();
+            var readerOptions = ReaderOptions.ForExternalStream;
 
             readerOptions.ArchiveEncoding.Default = encoding ?? Encoding.Default;
 
-            using var reader = ReaderFactory.Open(
-                SharpCompressStream.Create(stream, leaveOpen: true),
-                readerOptions
+            await using var reader = await ReaderFactory.OpenAsyncReader(
+                new AsyncOnlyStream(SharpCompressStream.CreateNonDisposing(stream)),
+                readerOptions,
+                cancellationToken
             );
-            reader.WriteAllToDirectory(
+            await reader.WriteAllToDirectoryAsync(
                 SCRATCH_FILES_PATH,
-                new ExtractionOptions { ExtractFullPath = true }
+                cancellationToken: cancellationToken
             );
         }
         VerifyFiles();

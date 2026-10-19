@@ -1,0 +1,102 @@
+# Formats
+
+## Accessing Archives
+
+* Archive classes allow random access to a seekable stream.
+* Reader classes allow forward-only reading on a stream.
+* Writer classes allow forward-only Writing on a stream.
+
+## Supported Format Table
+
+| Archive Format     | Compression Format(s)                                               | Compress/Decompress | Archive API     | Reader API | Writer API      |
+| ------------------ | ------------------------------------------------------------------- | ------------------- | --------------- | ---------- | --------------- |
+| Ace                | None                                                                | Decompress          | N/A             | AceReader  | N/A             |
+| Arc                | None, Packed, Squeezed, Crunched                                    | Decompress          | N/A             | ArcReader  | N/A             |
+| Arj                | None                                                                | Decompress          | N/A             | ArjReader  | N/A             |
+| Rar                | Rar                                                                 | Decompress          | RarArchive      | RarReader  | N/A             |
+| Zip (2)            | None, Shrink, Reduce, Implode, DEFLATE, Deflate64, BZip2, LZMA, PPMd, ZStandard, XZ | Both                | ZipArchive      | ZipReader  | ZipWriter       |
+| Tar                | None                                                                | Both                | TarArchive      | TarReader  | TarWriter (3)   |
+| Tar.GZip           | DEFLATE                                                             | Both                | N/A             | TarReader  | TarWriter (3)   |
+| Tar.BZip2          | BZip2                                                               | Both                | N/A             | TarReader  | TarWriter (3)   |
+| Tar.Zstandard      | ZStandard                                                           | Decompress          | N/A             | TarReader  | N/A             |
+| Tar.LZip           | LZMA                                                                | Both                | N/A             | TarReader  | TarWriter (3)   |
+| Tar.XZ             | LZMA2                                                               | Decompress          | N/A             | TarReader  | N/A             |
+| Tar.LZW            | LZW                                                                 | Decompress          | N/A             | TarReader  | N/A             |
+| GZip (single file) | DEFLATE                                                             | Both                | GZipArchive     | GZipReader | GZipWriter      |
+| 7Zip (4)           | LZMA, LZMA2, BZip2, PPMd, BCJ, BCJ2, Deflate                        | Both                | SevenZipArchive | N/A        | SevenZipWriter  |
+
+1. SOLID Rars are only supported in the RarReader API.
+2. Zip format supports reading and writing PKWARE traditional and WinZip AES-128/AES-256 encryption. Encrypted writing requires seekable output; supplying a password defaults to AES-256. Traditional encrypted entries requiring 64-bit data descriptors are unsupported. However, encrypted LZMA is not supported. Zip64 reading/writing is supported but only with seekable streams as the Zip spec doesn't support Zip64 data in post data descriptors. Deflate64, Shrink, Reduce, Implode, and XZ are only supported for reading. ZStandard is supported for reading and writing. See [Zip Format Notes](#zip-format-notes) for details on multi-volume archives and streaming behavior.
+3. The Tar format requires a file size in the header. If no size is specified to the TarWriter and the stream is not seekable, then an exception will be thrown.
+4. The 7Zip format doesn't allow for reading as a forward-only stream, so 7Zip read support is only through the Archive API. Writing is supported through SevenZipWriter for non-solid archives with LZMA/LZMA2 and requires a seekable output stream. See [7Zip Format Notes](#7zip-format-notes) for details on async extraction behavior.
+5. LZip has no support for extra data like the file name or timestamp. There is a default filename used when looking at the entry Key on the archive.
+
+`ArchiveFactory.DetectArchive(...)` reports which APIs in this table are available through `SharpCompress.Detection.ArchiveDetection.SupportedApis`. Reader-only formats include Ace, Arc, Arj, and standalone LZW. Compressed TAR wrappers are detected as a TAR container with an outer compression type and support the Reader API, not the Archive API. Use `ArchiveFactory.InspectArchive(...)` when complete archive metadata is required.
+
+### Zip Format Notes
+
+- Multi-volume/split ZIP archives require ZipArchive (seekable streams) as ZipReader cannot seek across volume files.
+- ZIP/ZIPX companion volumes are discovered with a case-insensitive filename fallback, including on case-sensitive filesystems. An exact generated filename takes precedence; ambiguous fallback matches throw `InvalidFormatException`.
+- WinZip AES authentication (HMAC-SHA1-80 over ciphertext) is verified independently of `CheckCrc`. Incorrect tags throw `InvalidFormatException`; truncated ciphertext or tags throw `IncompleteArchiveException`. Reading an entry to completion or disposing its stream verifies authentication.
+- ZipReader processes entries from LocalEntry headers (which include directory entries ending with `/`) and intentionally skips DirectoryEntry headers from the central directory, as they are redundant in streaming mode - all entry data comes from LocalEntry headers which ZipReader has already processed.
+- ZIP supports ZStandard for reading and writing. Tar.Zstandard support is read/decompress only.
+
+### Rar Format Notes
+
+- RAR5 encrypted headers and data accept KDF counts from 0 through 24 (the binary logarithm of the PBKDF2 iteration count), matching UnRAR's acceptance limit. Larger counts are rejected before key derivation.
+- RAR companion filenames use the same exact-match-first, case-insensitive fallback as ZIP, with ambiguous fallback matches rejected.
+- Encrypted ciphertext must contain complete AES blocks. Truncation throws `InvalidFormatException` on both synchronous and asynchronous reads.
+
+### 7Zip Format Notes
+
+- **Async Extraction Performance**: When using async extraction methods (e.g., `ExtractAllEntries()` with `MoveToNextEntryAsync()`), each file creates its own decompression stream to avoid state corruption in the LZMA decoder. This is less efficient than synchronous extraction, which can reuse a single decompression stream for multiple files in the same folder.
+  
+  **Performance Impact**: For archives with many small files in the same compression folder, async extraction will be slower than synchronous extraction because it must:
+  1. Create a new LZMA decoder for each file
+  2. Skip through the decompressed data to reach each file's starting position
+  
+  **Recommendation**: For best performance with 7Zip archives, use synchronous extraction methods (`MoveToNextEntry()` and `WriteEntryToDirectory()`) when possible. Use async methods only when you need to avoid blocking the thread (e.g., in UI applications or async-only contexts).
+
+  **Technical Details**: 7Zip archives group files into "folders" (compression units), where all files in a folder share one continuous LZMA-compressed stream. The LZMA decoder maintains internal state (dictionary window, decoder positions) that assumes sequential, non-interruptible processing. Async operations can yield control during awaits, which would corrupt this shared state. To avoid this, async extraction creates a fresh decoder stream for each file.
+
+### XZ Format Notes
+
+- XZ is a container format around LZMA2-compressed blocks, not just raw LZMA/LZMA2 data.
+- XZ streams can include per-block integrity checks selected by the stream header: CRC32, CRC64/XZ, SHA-256, or none. SharpCompress validates these checks while reading XZ blocks.
+- Raw LZMA/LZMA2 decoding does not provide the same container-level CRC validation; it only validates what the decoder format itself can detect, such as malformed compressed data or invalid end markers.
+
+## Compression Streams
+
+For those who want to directly compress/decompress bits. The single file formats are represented here as well. However, BZip2, LZip and XZ have no metadata (GZip has a little) so using them without something like a Tar file makes little sense.
+
+| Compressor      | Compress/Decompress |
+| --------------- | ------------------- |
+| BZip2Stream     | Both                |
+| GZipStream      | Both                |
+| DeflateStream   | Both                |
+| Deflate64Stream | Decompress          |
+| LZMAStream      | Both                |
+| PPMdStream      | Both                |
+| LzwStream       | Decompress          |
+| ADCStream       | Decompress          |
+| LZipStream      | Both                |
+| XZStream        | Decompress          |
+| ZStandard CompressionStream/DecompressionStream | Both                |
+
+## Archive Formats vs Compression
+
+Sometimes the terminology gets mixed.
+
+### Compression
+
+DEFLATE, LZMA are pure compression algorithms
+
+### Formats
+
+Formats like Zip, 7Zip, Rar are archive formats only. They use other compression methods (e.g. DEFLATE, LZMA, etc.) or propriatory (e.g RAR)
+
+### Overlap
+
+GZip, BZip2, LZip, XZ, LZW, and ZStandard are single file or compression wrapper formats. The overlap in the API happens because Tar uses these formats as "compression" methods and the API tries to hide this a bit.
+
+`ArchiveType` represents archive containers exposed by the high-level APIs (`Rar`, `Zip`, `Tar`, `SevenZip`, `GZip`, `Arc`, `Arj`, `Ace`, and `Lzw`). `XZ` and `ZStandard` are represented as `CompressionType` values rather than `ArchiveType` values.

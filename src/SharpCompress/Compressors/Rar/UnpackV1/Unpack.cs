@@ -27,13 +27,19 @@ internal sealed partial class Unpack : BitInput, IRarUnpack
         if (!disposed)
         {
             base.Dispose();
-            if (!externalWindow && window is not null)
-            {
-                ArrayPool<byte>.Shared.Return(window);
-                window = null;
-            }
+            ReleaseWindow();
             rarVM.Dispose();
+            ppm.Dispose();
             disposed = true;
+        }
+    }
+
+    private void ReleaseWindow()
+    {
+        if (window is not null)
+        {
+            ArrayPool<byte>.Shared.Return(window);
+            window = null;
         }
     }
 
@@ -55,16 +61,14 @@ internal sealed partial class Unpack : BitInput, IRarUnpack
         set => suspended = value;
     }
 
-    public int Char
+    public int ReadChar()
     {
-        get
+        if (inAddr > MAX_SIZE - 30)
         {
-            if (inAddr > MAX_SIZE - 30)
-            {
-                unpReadBuf();
-            }
-            return (InBuf[inAddr++] & 0xff);
+            unpReadBuf();
         }
+
+        return (InBuf[inAddr++] & 0xff);
     }
 
     public int PpmEscChar { get; set; }
@@ -90,8 +94,6 @@ internal sealed partial class Unpack : BitInput, IRarUnpack
     private readonly byte[] unpOldTable = new byte[PackDef.HUFF_TABLE_SIZE];
 
     private BlockTypes unpBlockType;
-
-    private bool externalWindow;
 
     private long writtenFileSize;
 
@@ -126,17 +128,13 @@ internal sealed partial class Unpack : BitInput, IRarUnpack
 
     private FileHeader fileHeader;
 
-    private void Init(byte[] window)
+    private void Init()
     {
-        if (this.window is null && window is null)
+        if (this.window is null)
         {
             this.window = ArrayPool<byte>.Shared.Rent(PackDef.MAXWINSIZE);
         }
-        else if (window is not null)
-        {
-            this.window = window;
-            externalWindow = true;
-        }
+
         inAddr = 0;
         UnpInitData(false);
     }
@@ -149,29 +147,18 @@ internal sealed partial class Unpack : BitInput, IRarUnpack
         this.writeStream = writeStream;
         if (!fileHeader.IsSolid)
         {
-            Init(null);
+            if (fileHeader.IsStored)
+            {
+                ReleaseWindow();
+            }
+            else
+            {
+                Init();
+            }
         }
+
         suspended = false;
         DoUnpack();
-    }
-
-    public async System.Threading.Tasks.Task DoUnpackAsync(
-        FileHeader fileHeader,
-        Stream readStream,
-        Stream writeStream,
-        System.Threading.CancellationToken cancellationToken = default
-    )
-    {
-        destUnpSize = fileHeader.UncompressedSize;
-        this.fileHeader = fileHeader;
-        this.readStream = readStream;
-        this.writeStream = writeStream;
-        if (!fileHeader.IsSolid)
-        {
-            Init(null);
-        }
-        suspended = false;
-        await DoUnpackAsync(cancellationToken).ConfigureAwait(false);
     }
 
     public void DoUnpack()
@@ -181,6 +168,7 @@ internal sealed partial class Unpack : BitInput, IRarUnpack
             UnstoreFile();
             return;
         }
+
         switch (fileHeader.CompressionAlgorithm)
         {
             case 15: // rar 1.5 compression
@@ -208,42 +196,6 @@ internal sealed partial class Unpack : BitInput, IRarUnpack
         }
     }
 
-    public async System.Threading.Tasks.Task DoUnpackAsync(
-        System.Threading.CancellationToken cancellationToken = default
-    )
-    {
-        if (fileHeader.CompressionMethod == 0)
-        {
-            await UnstoreFileAsync(cancellationToken).ConfigureAwait(false);
-            return;
-        }
-        switch (fileHeader.CompressionAlgorithm)
-        {
-            case 15: // rar 1.5 compression
-                await unpack15Async(fileHeader.IsSolid, cancellationToken).ConfigureAwait(false);
-                break;
-
-            case 20: // rar 2.x compression
-            case 26: // files larger than 2GB
-                await unpack20Async(fileHeader.IsSolid, cancellationToken).ConfigureAwait(false);
-                break;
-
-            case 29: // rar 3.x compression
-            case 36: // alternative hash
-                await Unpack29Async(fileHeader.IsSolid, cancellationToken).ConfigureAwait(false);
-                break;
-
-            case 50: // rar 5.x compression
-                await Unpack5Async(fileHeader.IsSolid, cancellationToken).ConfigureAwait(false);
-                break;
-
-            default:
-                throw new InvalidFormatException(
-                    "unknown rar compression version " + fileHeader.CompressionAlgorithm
-                );
-        }
-    }
-
     private void UnstoreFile()
     {
         Span<byte> buffer = stackalloc byte[(int)Math.Min(0x10000, destUnpSize)];
@@ -254,28 +206,9 @@ internal sealed partial class Unpack : BitInput, IRarUnpack
             {
                 break;
             }
+
             code = code < destUnpSize ? code : (int)destUnpSize;
             writeStream.Write(buffer.Slice(0, code));
-            destUnpSize -= code;
-        } while (!suspended && destUnpSize > 0);
-    }
-
-    private async System.Threading.Tasks.Task UnstoreFileAsync(
-        System.Threading.CancellationToken cancellationToken = default
-    )
-    {
-        var buffer = new byte[(int)Math.Min(0x10000, destUnpSize)];
-        do
-        {
-            var code = await readStream
-                .ReadAsync(buffer, 0, buffer.Length, cancellationToken)
-                .ConfigureAwait(false);
-            if (code == 0 || code == -1)
-            {
-                break;
-            }
-            code = code < destUnpSize ? code : (int)destUnpSize;
-            await writeStream.WriteAsync(buffer, 0, code, cancellationToken).ConfigureAwait(false);
             destUnpSize -= code;
         } while (!suspended && destUnpSize > 0);
     }
@@ -312,6 +245,7 @@ internal sealed partial class Unpack : BitInput, IRarUnpack
             {
                 return;
             }
+
             if ((!solid || !tablesRead) && !ReadTables())
             {
                 return;
@@ -344,12 +278,14 @@ internal sealed partial class Unpack : BitInput, IRarUnpack
                 {
                     return;
                 }
+
                 if (suspended)
                 {
                     FileExtracted = false;
                     return;
                 }
             }
+
             if (unpBlockType == BlockTypes.BLOCK_PPM)
             {
                 var Ch = ppm.DecodeChar();
@@ -358,6 +294,7 @@ internal sealed partial class Unpack : BitInput, IRarUnpack
                     ppmError = true;
                     break;
                 }
+
                 if (Ch == PpmEscChar)
                 {
                     var NextCh = ppm.DecodeChar();
@@ -367,20 +304,25 @@ internal sealed partial class Unpack : BitInput, IRarUnpack
                         {
                             break;
                         }
+
                         continue;
                     }
+
                     if (NextCh == 2 || NextCh == -1)
                     {
                         break;
                     }
+
                     if (NextCh == 3)
                     {
                         if (!ReadVMCodePPM())
                         {
                             break;
                         }
+
                         continue;
                     }
+
                     if (NextCh == 4)
                     {
                         int Distance = 0,
@@ -407,13 +349,16 @@ internal sealed partial class Unpack : BitInput, IRarUnpack
                                 }
                             }
                         }
+
                         if (failed)
                         {
                             break;
                         }
+
                         CopyString(Length + 32, Distance + 2);
                         continue;
                     }
+
                     if (NextCh == 5)
                     {
                         var Length = ppm.DecodeChar();
@@ -421,10 +366,12 @@ internal sealed partial class Unpack : BitInput, IRarUnpack
                         {
                             break;
                         }
+
                         CopyString(Length + 4, 1);
                         continue;
                     }
                 }
+
                 window[unpPtr++] = (byte)Ch;
                 continue;
             }
@@ -435,6 +382,7 @@ internal sealed partial class Unpack : BitInput, IRarUnpack
                 window[unpPtr++] = (byte)Number;
                 continue;
             }
+
             if (Number >= 271)
             {
                 var Length = LDecode[Number -= 271] + 3;
@@ -455,6 +403,7 @@ internal sealed partial class Unpack : BitInput, IRarUnpack
                             Distance += ((Utility.URShift(GetBits(), (20 - Bits))) << 4);
                             AddBits(Bits - 4);
                         }
+
                         if (lowDistRepCount > 0)
                         {
                             lowDistRepCount--;
@@ -497,30 +446,37 @@ internal sealed partial class Unpack : BitInput, IRarUnpack
                 CopyString(Length, Distance);
                 continue;
             }
+
             if (Number == 256)
             {
                 if (!ReadEndOfBlock())
                 {
                     break;
                 }
+
                 continue;
             }
+
             if (Number == 257)
             {
                 if (!ReadVMCode())
                 {
                     break;
                 }
+
                 continue;
             }
+
             if (Number == 258)
             {
                 if (lastLength != 0)
                 {
                     CopyString(lastLength, lastDist);
                 }
+
                 continue;
             }
+
             if (Number < 263)
             {
                 var DistNum = Number - 259;
@@ -529,6 +485,7 @@ internal sealed partial class Unpack : BitInput, IRarUnpack
                 {
                     oldDist[I] = oldDist[I - 1];
                 }
+
                 oldDist[0] = Distance;
 
                 var LengthNumber = this.decodeNumber(RD);
@@ -538,10 +495,12 @@ internal sealed partial class Unpack : BitInput, IRarUnpack
                     Length += Utility.URShift(GetBits(), (16 - Bits));
                     AddBits(Bits);
                 }
+
                 InsertLastMatch(Length, Distance);
                 CopyString(Length, Distance);
                 continue;
             }
+
             if (Number < 272)
             {
                 var Distance = SDDecode[Number -= 263] + 1;
@@ -550,287 +509,14 @@ internal sealed partial class Unpack : BitInput, IRarUnpack
                     Distance += Utility.URShift(GetBits(), (16 - Bits));
                     AddBits(Bits);
                 }
+
                 InsertOldDist(Distance);
                 InsertLastMatch(2, Distance);
                 CopyString(2, Distance);
             }
         }
+
         UnpWriteBuf();
-    }
-
-    private async System.Threading.Tasks.Task Unpack29Async(
-        bool solid,
-        System.Threading.CancellationToken cancellationToken = default
-    )
-    {
-        int[] DDecode = new int[PackDef.DC];
-        byte[] DBits = new byte[PackDef.DC];
-
-        int Bits;
-
-        if (DDecode[1] == 0)
-        {
-            int Dist = 0,
-                BitLength = 0,
-                Slot = 0;
-            for (var I = 0; I < DBitLengthCounts.Length; I++, BitLength++)
-            {
-                var count = DBitLengthCounts[I];
-                for (var J = 0; J < count; J++, Slot++, Dist += (1 << BitLength))
-                {
-                    DDecode[Slot] = Dist;
-                    DBits[Slot] = (byte)BitLength;
-                }
-            }
-        }
-
-        FileExtracted = true;
-
-        if (!suspended)
-        {
-            UnpInitData(solid);
-            if (!await unpReadBufAsync(cancellationToken).ConfigureAwait(false))
-            {
-                return;
-            }
-            if ((!solid || !tablesRead) && !ReadTables())
-            {
-                return;
-            }
-        }
-
-        if (ppmError)
-        {
-            return;
-        }
-
-        while (true)
-        {
-            unpPtr &= PackDef.MAXWINMASK;
-
-            if (inAddr > readBorder)
-            {
-                if (!await unpReadBufAsync(cancellationToken).ConfigureAwait(false))
-                {
-                    break;
-                }
-            }
-
-            if (((wrPtr - unpPtr) & PackDef.MAXWINMASK) < 260 && wrPtr != unpPtr)
-            {
-                await UnpWriteBufAsync(cancellationToken).ConfigureAwait(false);
-                if (destUnpSize < 0)
-                {
-                    return;
-                }
-                if (suspended)
-                {
-                    FileExtracted = false;
-                    return;
-                }
-            }
-            if (unpBlockType == BlockTypes.BLOCK_PPM)
-            {
-                var ch = ppm.DecodeChar();
-                if (ch == -1)
-                {
-                    ppmError = true;
-                    break;
-                }
-                if (ch == PpmEscChar)
-                {
-                    var nextCh = ppm.DecodeChar();
-                    if (nextCh == 0)
-                    {
-                        if (!ReadTables())
-                        {
-                            break;
-                        }
-                        continue;
-                    }
-                    if (nextCh == 2 || nextCh == -1)
-                    {
-                        break;
-                    }
-                    if (nextCh == 3)
-                    {
-                        if (!ReadVMCode())
-                        {
-                            break;
-                        }
-                        continue;
-                    }
-                    if (nextCh == 4)
-                    {
-                        uint Distance = 0,
-                            Length = 0;
-                        var failed = false;
-                        for (var I = 0; I < 4 && !failed; I++)
-                        {
-                            var ch2 = ppm.DecodeChar();
-                            if (ch2 == -1)
-                            {
-                                failed = true;
-                            }
-                            else if (I == 3)
-                            {
-                                Length = (uint)ch2;
-                            }
-                            else
-                            {
-                                Distance = (Distance << 8) + (uint)ch2;
-                            }
-                        }
-                        if (failed)
-                        {
-                            break;
-                        }
-
-                        CopyString(Length + 32, Distance + 2);
-                        continue;
-                    }
-                    if (nextCh == 5)
-                    {
-                        var length = ppm.DecodeChar();
-                        if (length == -1)
-                        {
-                            break;
-                        }
-                        CopyString((uint)(length + 4), 1);
-                        continue;
-                    }
-                }
-                window[unpPtr++] = (byte)ch;
-                continue;
-            }
-
-            var Number = this.decodeNumber(LD);
-            if (Number < 256)
-            {
-                window[unpPtr++] = (byte)Number;
-                continue;
-            }
-            if (Number >= 271)
-            {
-                var Length = LDecode[Number -= 271] + 3;
-                if ((Bits = LBits[Number]) > 0)
-                {
-                    Length += GetBits() >> (16 - Bits);
-                    AddBits(Bits);
-                }
-
-                var DistNumber = this.decodeNumber(DD);
-                var Distance = DDecode[DistNumber] + 1;
-                if ((Bits = DBits[DistNumber]) > 0)
-                {
-                    if (DistNumber > 9)
-                    {
-                        if (Bits > 4)
-                        {
-                            Distance += (GetBits() >> (20 - Bits)) << 4;
-                            AddBits(Bits - 4);
-                        }
-                        if (lowDistRepCount > 0)
-                        {
-                            lowDistRepCount--;
-                            Distance += prevLowDist;
-                        }
-                        else
-                        {
-                            var LowDist = this.decodeNumber(LDD);
-                            if (LowDist == 16)
-                            {
-                                lowDistRepCount = PackDef.LOW_DIST_REP_COUNT - 1;
-                                Distance += prevLowDist;
-                            }
-                            else
-                            {
-                                Distance += LowDist;
-                                prevLowDist = (int)LowDist;
-                            }
-                        }
-                    }
-                    else
-                    {
-                        Distance += GetBits() >> (16 - Bits);
-                        AddBits(Bits);
-                    }
-                }
-
-                if (Distance >= 0x2000)
-                {
-                    Length++;
-                    if (Distance >= 0x40000)
-                    {
-                        Length++;
-                    }
-                }
-
-                InsertOldDist(Distance);
-                lastLength = Length;
-                CopyString(Length, Distance);
-                continue;
-            }
-            if (Number == 256)
-            {
-                if (!ReadEndOfBlock())
-                {
-                    break;
-                }
-                continue;
-            }
-            if (Number == 257)
-            {
-                if (!ReadVMCode())
-                {
-                    break;
-                }
-                continue;
-            }
-            if (Number == 258)
-            {
-                if (lastLength != 0)
-                {
-                    CopyString(lastLength, oldDist[0]);
-                }
-
-                continue;
-            }
-            if (Number < 263)
-            {
-                var DistNum = Number - 259;
-                var Distance = (uint)oldDist[DistNum];
-                for (var I = DistNum; I > 0; I--)
-                {
-                    oldDist[I] = oldDist[I - 1];
-                }
-                oldDist[0] = (int)Distance;
-
-                var LengthNumber = this.decodeNumber(RD);
-                var Length = LDecode[LengthNumber] + 2;
-                if ((Bits = LBits[LengthNumber]) > 0)
-                {
-                    Length += GetBits() >> (16 - Bits);
-                    AddBits(Bits);
-                }
-                lastLength = Length;
-                CopyString((uint)Length, Distance);
-                continue;
-            }
-            if (Number < 272)
-            {
-                var Distance = SDDecode[Number -= 263] + 1;
-                if ((Bits = SDBits[Number]) > 0)
-                {
-                    Distance += GetBits() >> (16 - Bits);
-                    AddBits(Bits);
-                }
-                InsertOldDist((uint)Distance);
-                lastLength = 2;
-                CopyString(2, (uint)Distance);
-            }
-        }
-        await UnpWriteBufAsync(cancellationToken).ConfigureAwait(false);
     }
 
     private void UnpWriteBuf()
@@ -844,11 +530,13 @@ internal sealed partial class Unpack : BitInput, IRarUnpack
             {
                 continue;
             }
+
             if (flt.NextWindow)
             {
                 flt.NextWindow = false; // ->NextWindow=false;
                 continue;
             }
+
             var BlockStart = flt.BlockStart; // ->BlockStart;
             var BlockLength = flt.BlockLength; // ->BlockLength;
             if (((BlockStart - WrittenBorder) & PackDef.MAXWINMASK) < WriteSize)
@@ -859,6 +547,7 @@ internal sealed partial class Unpack : BitInput, IRarUnpack
                     WrittenBorder = BlockStart;
                     WriteSize = (unpPtr - WrittenBorder) & PackDef.MAXWINMASK;
                 }
+
                 if (BlockLength <= WriteSize)
                 {
                     var BlockEnd = (BlockStart + BlockLength) & PackDef.MAXWINMASK;
@@ -1009,9 +698,12 @@ internal sealed partial class Unpack : BitInput, IRarUnpack
                             FilteredDataSize = NextPrg.FilteredDataSize;
                             if (FilteredData.Length < FilteredDataSize)
                             {
+                                // Keep ownership of the old buffer if renting its replacement fails.
+                                var replacement = ArrayPool<byte>.Shared.Rent(FilteredDataSize);
                                 ArrayPool<byte>.Shared.Return(FilteredData);
-                                FilteredData = ArrayPool<byte>.Shared.Rent(FilteredDataSize);
+                                FilteredData = replacement;
                             }
+
                             for (var i = 0; i < FilteredDataSize; i++)
                             {
                                 FilteredData[i] = NextPrg.GlobalData[FilteredDataOffset + i];
@@ -1042,6 +734,7 @@ internal sealed partial class Unpack : BitInput, IRarUnpack
                             filt.NextWindow = false;
                         }
                     }
+
                     wrPtr = WrittenBorder;
                     return;
                 }
@@ -1073,11 +766,13 @@ internal sealed partial class Unpack : BitInput, IRarUnpack
         {
             return;
         }
+
         var writeSize = size;
         if (writeSize > destUnpSize)
         {
             writeSize = (int)destUnpSize;
         }
+
         writeStream.Write(data, offset, writeSize);
 
         writtenFileSize += size;
@@ -1127,6 +822,7 @@ internal sealed partial class Unpack : BitInput, IRarUnpack
             {
                 window[unpPtr + i] = window[destPtr + i];
             }
+
             unpPtr += length;
         }
         else
@@ -1160,6 +856,7 @@ internal sealed partial class Unpack : BitInput, IRarUnpack
 
             InitFilters();
         }
+
         InitBitInput();
         ppmError = false;
         writtenFileSize = 0;
@@ -1224,6 +921,7 @@ internal sealed partial class Unpack : BitInput, IRarUnpack
             NewTable = (BitField & 0x4000) != 0;
             AddBits(2);
         }
+
         tablesRead = !NewTable;
         return !(NewFile || NewTable && !ReadTables());
     }
@@ -1240,6 +938,7 @@ internal sealed partial class Unpack : BitInput, IRarUnpack
                 return (false);
             }
         }
+
         AddBits((8 - inBit) & 7);
         long bitField = GetBits() & unchecked((int)0xffFFffFF);
         if ((bitField & 0x8000) != 0)
@@ -1247,6 +946,7 @@ internal sealed partial class Unpack : BitInput, IRarUnpack
             unpBlockType = BlockTypes.BLOCK_PPM;
             return (ppm.DecodeInit(this, PpmEscChar));
         }
+
         unpBlockType = BlockTypes.BLOCK_LZ;
 
         prevLowDist = 0;
@@ -1256,6 +956,7 @@ internal sealed partial class Unpack : BitInput, IRarUnpack
         {
             new Span<byte>(unpOldTable).Clear(); // memset(UnpOldTable,0,sizeof(UnpOldTable));
         }
+
         AddBits(2);
 
         for (var i = 0; i < PackDef.BC; i++)
@@ -1277,6 +978,7 @@ internal sealed partial class Unpack : BitInput, IRarUnpack
                     {
                         bitLength[i++] = 0;
                     }
+
                     i--;
                 }
             }
@@ -1299,6 +1001,7 @@ internal sealed partial class Unpack : BitInput, IRarUnpack
                     return (false);
                 }
             }
+
             var Number = this.decodeNumber(BD);
             if (Number < 16)
             {
@@ -1318,6 +1021,7 @@ internal sealed partial class Unpack : BitInput, IRarUnpack
                     N = (Utility.URShift(GetBits(), 9)) + 11;
                     AddBits(7);
                 }
+
                 while (N-- > 0 && i < TableSize)
                 {
                     table[i] = table[i - 1];
@@ -1337,17 +1041,20 @@ internal sealed partial class Unpack : BitInput, IRarUnpack
                     N = (Utility.URShift(GetBits(), 9)) + 11;
                     AddBits(7);
                 }
+
                 while (N-- > 0 && i < TableSize)
                 {
                     table[i++] = 0;
                 }
             }
         }
+
         tablesRead = true;
         if (inAddr > readTop)
         {
             return (false);
         }
+
         UnpackUtility.makeDecodeTables(table, 0, LD, PackDef.NC);
         UnpackUtility.makeDecodeTables(table, PackDef.NC, DD, PackDef.DC);
         UnpackUtility.makeDecodeTables(table, PackDef.NC + PackDef.DC, LDD, PackDef.LDC);
@@ -1387,9 +1094,11 @@ internal sealed partial class Unpack : BitInput, IRarUnpack
             {
                 return (false);
             }
+
             vmCode.Add((byte)(GetBits() >> 8));
             AddBits(8);
         }
+
         return AddVMCode(FirstByte, vmCode);
     }
 
@@ -1400,6 +1109,7 @@ internal sealed partial class Unpack : BitInput, IRarUnpack
         {
             return (false);
         }
+
         var Length = (FirstByte & 7) + 1;
         if (Length == 7)
         {
@@ -1408,6 +1118,7 @@ internal sealed partial class Unpack : BitInput, IRarUnpack
             {
                 return (false);
             }
+
             Length = B1 + 7;
         }
         else if (Length == 8)
@@ -1417,11 +1128,13 @@ internal sealed partial class Unpack : BitInput, IRarUnpack
             {
                 return (false);
             }
+
             var B2 = ppm.DecodeChar();
             if (B2 == -1)
             {
                 return (false);
             }
+
             Length = (B1 * 256) + B2;
         }
 
@@ -1433,8 +1146,10 @@ internal sealed partial class Unpack : BitInput, IRarUnpack
             {
                 return (false);
             }
+
             vmCode.Add((byte)Ch); // VMCode[I]=Ch;
         }
+
         return AddVMCode(FirstByte, vmCode);
     }
 
@@ -1471,6 +1186,7 @@ internal sealed partial class Unpack : BitInput, IRarUnpack
         {
             return (false);
         }
+
         lastFilter = FiltPos;
         var NewFilter = (FiltPos == filters.Count);
 
@@ -1511,6 +1227,7 @@ internal sealed partial class Unpack : BitInput, IRarUnpack
         {
             BlockStart += 258;
         }
+
         StackFilter.BlockStart = ((BlockStart + unpPtr) & PackDef.MAXWINMASK);
         if ((firstByte & 0x20) != 0)
         {
@@ -1521,6 +1238,7 @@ internal sealed partial class Unpack : BitInput, IRarUnpack
             StackFilter.BlockLength =
                 FiltPos < oldFilterLengths.Count ? oldFilterLengths[FiltPos] : 0;
         }
+
         StackFilter.NextWindow =
             (wrPtr != unpPtr) && ((wrPtr - unpPtr) & PackDef.MAXWINMASK) <= BlockStart;
 
@@ -1583,6 +1301,7 @@ internal sealed partial class Unpack : BitInput, IRarUnpack
                 ArrayPool<byte>.Shared.Return(VMCode);
             }
         }
+
         StackFilter.Program.AltCommands = Filter.Program.Commands; // StackFilter->Prg.AltCmd=&Filter->Prg.Cmd[0];
         StackFilter.Program.CommandCount = Filter.Program.CommandCount;
 
@@ -1632,6 +1351,7 @@ internal sealed partial class Unpack : BitInput, IRarUnpack
         {
             globalData[0x30 + i] = 0x0;
         }
+
         if ((firstByte & 8) != 0)
         // put data block passed as parameter if any
         {
@@ -1639,11 +1359,13 @@ internal sealed partial class Unpack : BitInput, IRarUnpack
             {
                 return (false);
             }
+
             var DataSize = RarVM.ReadData(Inp);
             if (DataSize > RarVM.VM_GLOBALMEMSIZE - RarVM.VM_FIXEDGLOBALSIZE)
             {
                 return (false);
             }
+
             var CurSize = StackFilter.Program.GlobalData.Count;
             if (CurSize < DataSize + RarVM.VM_FIXEDGLOBALSIZE)
             {
@@ -1652,6 +1374,7 @@ internal sealed partial class Unpack : BitInput, IRarUnpack
                     DataSize + RarVM.VM_FIXEDGLOBALSIZE - CurSize
                 );
             }
+
             var offset = RarVM.VM_FIXEDGLOBALSIZE;
             globalData = StackFilter.Program.GlobalData;
             for (var I = 0; I < DataSize; I++)
@@ -1660,10 +1383,12 @@ internal sealed partial class Unpack : BitInput, IRarUnpack
                 {
                     return (false);
                 }
+
                 globalData[offset + I] = (byte)(Utility.URShift(Inp.GetBits(), 8));
                 Inp.AddBits(8);
             }
         }
+
         return (true);
     }
 
@@ -1689,262 +1414,8 @@ internal sealed partial class Unpack : BitInput, IRarUnpack
         }
     }
 
-    private async System.Threading.Tasks.Task UnpWriteBufAsync(
-        System.Threading.CancellationToken cancellationToken = default
-    )
-    {
-        var WrittenBorder = wrPtr;
-        var WriteSize = (unpPtr - WrittenBorder) & PackDef.MAXWINMASK;
-        for (var I = 0; I < prgStack.Count; I++)
-        {
-            var flt = prgStack[I];
-            if (flt is null)
-            {
-                continue;
-            }
-            if (flt.NextWindow)
-            {
-                flt.NextWindow = false;
-                continue;
-            }
-            var BlockStart = flt.BlockStart;
-            var BlockLength = flt.BlockLength;
-            if (((BlockStart - WrittenBorder) & PackDef.MAXWINMASK) < WriteSize)
-            {
-                if (WrittenBorder != BlockStart)
-                {
-                    await UnpWriteAreaAsync(WrittenBorder, BlockStart, cancellationToken)
-                        .ConfigureAwait(false);
-                    WrittenBorder = BlockStart;
-                    WriteSize = (unpPtr - WrittenBorder) & PackDef.MAXWINMASK;
-                }
-                if (BlockLength <= WriteSize)
-                {
-                    var BlockEnd = (BlockStart + BlockLength) & PackDef.MAXWINMASK;
-                    if (BlockStart < BlockEnd || BlockEnd == 0)
-                    {
-                        rarVM.setMemory(0, window, BlockStart, BlockLength);
-                    }
-                    else
-                    {
-                        var FirstPartLength = PackDef.MAXWINSIZE - BlockStart;
-                        rarVM.setMemory(0, window, BlockStart, FirstPartLength);
-                        rarVM.setMemory(FirstPartLength, window, 0, BlockEnd);
-                    }
-
-                    var ParentPrg = filters[flt.ParentFilter].Program;
-                    var Prg = flt.Program;
-
-                    if (ParentPrg.GlobalData.Count > RarVM.VM_FIXEDGLOBALSIZE)
-                    {
-                        Prg.GlobalData.Clear();
-                        for (
-                            var i = 0;
-                            i < ParentPrg.GlobalData.Count - RarVM.VM_FIXEDGLOBALSIZE;
-                            i++
-                        )
-                        {
-                            Prg.GlobalData[RarVM.VM_FIXEDGLOBALSIZE + i] = ParentPrg.GlobalData[
-                                RarVM.VM_FIXEDGLOBALSIZE + i
-                            ];
-                        }
-                    }
-
-                    ExecuteCode(Prg);
-
-                    if (Prg.GlobalData.Count > RarVM.VM_FIXEDGLOBALSIZE)
-                    {
-                        if (ParentPrg.GlobalData.Count < Prg.GlobalData.Count)
-                        {
-                            ParentPrg.GlobalData.SetSize(Prg.GlobalData.Count);
-                        }
-
-                        for (var i = 0; i < Prg.GlobalData.Count - RarVM.VM_FIXEDGLOBALSIZE; i++)
-                        {
-                            ParentPrg.GlobalData[RarVM.VM_FIXEDGLOBALSIZE + i] = Prg.GlobalData[
-                                RarVM.VM_FIXEDGLOBALSIZE + i
-                            ];
-                        }
-                    }
-                    else
-                    {
-                        ParentPrg.GlobalData.Clear();
-                    }
-
-                    var FilteredDataOffset = Prg.FilteredDataOffset;
-                    var FilteredDataSize = Prg.FilteredDataSize;
-                    var FilteredData = ArrayPool<byte>.Shared.Rent(FilteredDataSize);
-                    try
-                    {
-                        Array.Copy(
-                            rarVM.Mem,
-                            FilteredDataOffset,
-                            FilteredData,
-                            0,
-                            FilteredDataSize
-                        );
-
-                        prgStack[I] = null;
-                        while (I + 1 < prgStack.Count)
-                        {
-                            var NextFilter = prgStack[I + 1];
-                            if (
-                                NextFilter is null
-                                || NextFilter.BlockStart != BlockStart
-                                || NextFilter.BlockLength != FilteredDataSize
-                                || NextFilter.NextWindow
-                            )
-                            {
-                                break;
-                            }
-
-                            rarVM.setMemory(0, FilteredData, 0, FilteredDataSize);
-
-                            var pPrg = filters[NextFilter.ParentFilter].Program;
-                            var NextPrg = NextFilter.Program;
-
-                            if (pPrg.GlobalData.Count > RarVM.VM_FIXEDGLOBALSIZE)
-                            {
-                                NextPrg.GlobalData.SetSize(pPrg.GlobalData.Count);
-
-                                for (
-                                    var i = 0;
-                                    i < pPrg.GlobalData.Count - RarVM.VM_FIXEDGLOBALSIZE;
-                                    i++
-                                )
-                                {
-                                    NextPrg.GlobalData[RarVM.VM_FIXEDGLOBALSIZE + i] =
-                                        pPrg.GlobalData[RarVM.VM_FIXEDGLOBALSIZE + i];
-                                }
-                            }
-
-                            ExecuteCode(NextPrg);
-
-                            if (NextPrg.GlobalData.Count > RarVM.VM_FIXEDGLOBALSIZE)
-                            {
-                                if (pPrg.GlobalData.Count < NextPrg.GlobalData.Count)
-                                {
-                                    pPrg.GlobalData.SetSize(NextPrg.GlobalData.Count);
-                                }
-
-                                for (
-                                    var i = 0;
-                                    i < NextPrg.GlobalData.Count - RarVM.VM_FIXEDGLOBALSIZE;
-                                    i++
-                                )
-                                {
-                                    pPrg.GlobalData[RarVM.VM_FIXEDGLOBALSIZE + i] =
-                                        NextPrg.GlobalData[RarVM.VM_FIXEDGLOBALSIZE + i];
-                                }
-                            }
-                            else
-                            {
-                                pPrg.GlobalData.Clear();
-                            }
-
-                            FilteredDataOffset = NextPrg.FilteredDataOffset;
-                            FilteredDataSize = NextPrg.FilteredDataSize;
-                            if (FilteredData.Length < FilteredDataSize)
-                            {
-                                ArrayPool<byte>.Shared.Return(FilteredData);
-                                FilteredData = ArrayPool<byte>.Shared.Rent(FilteredDataSize);
-                            }
-                            for (var i = 0; i < FilteredDataSize; i++)
-                            {
-                                FilteredData[i] = NextPrg.GlobalData[FilteredDataOffset + i];
-                            }
-
-                            I++;
-                            prgStack[I] = null;
-                        }
-
-                        await writeStream
-                            .WriteAsync(FilteredData, 0, FilteredDataSize, cancellationToken)
-                            .ConfigureAwait(false);
-                        writtenFileSize += FilteredDataSize;
-                        destUnpSize -= FilteredDataSize;
-                        WrittenBorder = BlockEnd;
-                        WriteSize = (unpPtr - WrittenBorder) & PackDef.MAXWINMASK;
-                    }
-                    finally
-                    {
-                        ArrayPool<byte>.Shared.Return(FilteredData);
-                    }
-                }
-                else
-                {
-                    for (var J = I; J < prgStack.Count; J++)
-                    {
-                        var filt = prgStack[J];
-                        if (filt != null && filt.NextWindow)
-                        {
-                            filt.NextWindow = false;
-                        }
-                    }
-                    wrPtr = WrittenBorder;
-                    return;
-                }
-            }
-        }
-
-        await UnpWriteAreaAsync(WrittenBorder, unpPtr, cancellationToken).ConfigureAwait(false);
-        wrPtr = unpPtr;
-    }
-
-    private async System.Threading.Tasks.Task UnpWriteAreaAsync(
-        int startPtr,
-        int endPtr,
-        System.Threading.CancellationToken cancellationToken = default
-    )
-    {
-        if (endPtr < startPtr)
-        {
-            await UnpWriteDataAsync(
-                    window,
-                    startPtr,
-                    -startPtr & PackDef.MAXWINMASK,
-                    cancellationToken
-                )
-                .ConfigureAwait(false);
-            await UnpWriteDataAsync(window, 0, endPtr, cancellationToken).ConfigureAwait(false);
-        }
-        else
-        {
-            await UnpWriteDataAsync(window, startPtr, endPtr - startPtr, cancellationToken)
-                .ConfigureAwait(false);
-        }
-    }
-
-    private async System.Threading.Tasks.Task UnpWriteDataAsync(
-        byte[] data,
-        int offset,
-        int size,
-        System.Threading.CancellationToken cancellationToken = default
-    )
-    {
-        if (destUnpSize < 0)
-        {
-            return;
-        }
-        var writeSize = size;
-        if (writeSize > destUnpSize)
-        {
-            writeSize = (int)destUnpSize;
-        }
-        await writeStream
-            .WriteAsync(data, offset, writeSize, cancellationToken)
-            .ConfigureAwait(false);
-
-        writtenFileSize += size;
-        destUnpSize -= size;
-    }
-
     private void CleanUp()
     {
-        if (ppm != null)
-        {
-            var allocator = ppm.SubAlloc;
-            allocator?.StopSubAllocator();
-        }
+        ppm.Dispose();
     }
 }

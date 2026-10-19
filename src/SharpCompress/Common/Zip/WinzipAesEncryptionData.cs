@@ -1,10 +1,16 @@
 using System;
 using System.Buffers.Binary;
+using System.Diagnostics.CodeAnalysis;
 using System.Security.Cryptography;
 using System.Text;
 
 namespace SharpCompress.Common.Zip;
 
+[SuppressMessage(
+    "Security",
+    "CA5379:Rfc2898DeriveBytes might be using a weak hash algorithm",
+    Justification = "WinZip AES specification requires PBKDF2 with SHA-1."
+)]
 internal class WinzipAesEncryptionData
 {
     private const int RFC2898_ITERATIONS = 1000;
@@ -17,38 +23,21 @@ internal class WinzipAesEncryptionData
         byte[] passwordVerifyValue,
         string password
     )
+        : this(keySize, DeriveKey(keySize, salt, password), passwordVerifyValue) { }
+
+    /// <summary>
+    /// Builds the encryption data from key material derived ahead of time by <see cref="DeriveKey"/>.
+    /// </summary>
+    internal WinzipAesEncryptionData(
+        WinzipAesKeySize keySize,
+        byte[] derivedKey,
+        byte[] passwordVerifyValue
+    )
     {
         _keySize = keySize;
-
-#if NETFRAMEWORK || NETSTANDARD2_0
-        var rfc2898 = new Rfc2898DeriveBytes(password, salt, RFC2898_ITERATIONS);
-        KeyBytes = rfc2898.GetBytes(KeySizeInBytes);
-        IvBytes = rfc2898.GetBytes(KeySizeInBytes);
-        var generatedVerifyValue = rfc2898.GetBytes(2);
-#elif NET10_0_OR_GREATER
-        var derivedKeySize = (KeySizeInBytes * 2) + 2;
-        var passwordBytes = Encoding.UTF8.GetBytes(password);
-        var derivedKey = Rfc2898DeriveBytes.Pbkdf2(
-            passwordBytes,
-            salt,
-            RFC2898_ITERATIONS,
-            HashAlgorithmName.SHA1,
-            derivedKeySize
-        );
         KeyBytes = derivedKey.AsSpan(0, KeySizeInBytes).ToArray();
         IvBytes = derivedKey.AsSpan(KeySizeInBytes, KeySizeInBytes).ToArray();
-        var generatedVerifyValue = derivedKey.AsSpan((KeySizeInBytes * 2), 2).ToArray();
-#else
-        var rfc2898 = new Rfc2898DeriveBytes(
-            password,
-            salt,
-            RFC2898_ITERATIONS,
-            HashAlgorithmName.SHA1
-        );
-        KeyBytes = rfc2898.GetBytes(KeySizeInBytes);
-        IvBytes = rfc2898.GetBytes(KeySizeInBytes);
-        var generatedVerifyValue = rfc2898.GetBytes(2);
-#endif
+        var generatedVerifyValue = derivedKey.AsSpan(KeySizeInBytes * 2, 2).ToArray();
 
         var verify = BinaryPrimitives.ReadInt16LittleEndian(passwordVerifyValue);
         var generated = BinaryPrimitives.ReadInt16LittleEndian(generatedVerifyValue);
@@ -56,6 +45,36 @@ internal class WinzipAesEncryptionData
         {
             throw new InvalidFormatException("bad password");
         }
+    }
+
+    /// <summary>
+    /// Derives the encryption key, authentication key and password verifier (PBKDF2-SHA1, 1000 iterations).
+    /// This is the dominant per-entry cost and is safe to run on any thread.
+    /// </summary>
+    internal static byte[] DeriveKey(WinzipAesKeySize keySize, byte[] salt, string password)
+    {
+        var keyLength = KeyLengthInBytes(keySize);
+
+#if LEGACY_DOTNET
+        var rfc2898 = new Rfc2898DeriveBytes(password, salt, RFC2898_ITERATIONS);
+        return rfc2898.GetBytes((keyLength * 2) + 2);
+#elif NET10_0_OR_GREATER
+        return Rfc2898DeriveBytes.Pbkdf2(
+            Encoding.UTF8.GetBytes(password),
+            salt,
+            RFC2898_ITERATIONS,
+            HashAlgorithmName.SHA1,
+            (keyLength * 2) + 2
+        );
+#else
+        using var rfc2898 = new Rfc2898DeriveBytes(
+            password,
+            salt,
+            RFC2898_ITERATIONS,
+            HashAlgorithmName.SHA1
+        );
+        return rfc2898.GetBytes((keyLength * 2) + 2);
+#endif
     }
 
     internal byte[] IvBytes { get; set; }
@@ -70,6 +89,6 @@ internal class WinzipAesEncryptionData
             WinzipAesKeySize.KeySize128 => 16,
             WinzipAesKeySize.KeySize192 => 24,
             WinzipAesKeySize.KeySize256 => 32,
-            _ => throw new InvalidOperationException(),
+            _ => throw new ArchiveOperationException(),
         };
 }

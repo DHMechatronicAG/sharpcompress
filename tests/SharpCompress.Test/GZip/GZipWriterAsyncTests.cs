@@ -1,6 +1,9 @@
 using System.IO;
 using System.Threading.Tasks;
 using SharpCompress.Common;
+using SharpCompress.Providers;
+using SharpCompress.Providers.System;
+using SharpCompress.Test.Mocks;
 using SharpCompress.Writers;
 using SharpCompress.Writers.GZip;
 using Xunit;
@@ -13,7 +16,7 @@ public class GZipWriterAsyncTests : WriterTests
         : base(ArchiveType.GZip) => UseExtensionInsteadOfNameToVerify = true;
 
     [Fact]
-    public async Task GZip_Writer_Generic_Async()
+    public async ValueTask GZip_Writer_Generic_Async()
     {
         using (
             Stream stream = File.Open(
@@ -22,7 +25,13 @@ public class GZipWriterAsyncTests : WriterTests
                 FileAccess.Write
             )
         )
-        using (var writer = WriterFactory.Open(stream, ArchiveType.GZip, CompressionType.GZip))
+        await using (
+            var writer = await WriterFactory.OpenAsyncWriter(
+                new AsyncOnlyStream(stream),
+                ArchiveType.GZip,
+                new WriterOptions(CompressionType.GZip)
+            )
+        )
         {
             await writer.WriteAsync("Tar.tar", Path.Combine(TEST_ARCHIVES_PATH, "Tar.tar"));
         }
@@ -33,7 +42,7 @@ public class GZipWriterAsyncTests : WriterTests
     }
 
     [Fact]
-    public async Task GZip_Writer_Async()
+    public async ValueTask GZip_Writer_Async()
     {
         using (
             Stream stream = File.Open(
@@ -42,7 +51,7 @@ public class GZipWriterAsyncTests : WriterTests
                 FileAccess.Write
             )
         )
-        using (var writer = new GZipWriter(stream))
+        await using (var writer = new GZipWriter(new AsyncOnlyStream(stream)))
         {
             await writer.WriteAsync("Tar.tar", Path.Combine(TEST_ARCHIVES_PATH, "Tar.tar"));
         }
@@ -57,11 +66,15 @@ public class GZipWriterAsyncTests : WriterTests
         Assert.Throws<InvalidFormatException>(() =>
         {
             using Stream stream = File.OpenWrite(Path.Combine(SCRATCH_FILES_PATH, "Tar.tar.gz"));
-            using var writer = WriterFactory.Open(stream, ArchiveType.GZip, CompressionType.BZip2);
+            using var writer = WriterFactory.OpenWriter(
+                new AsyncOnlyStream(stream),
+                ArchiveType.GZip,
+                new WriterOptions(CompressionType.BZip2)
+            );
         });
 
     [Fact]
-    public async Task GZip_Writer_Entry_Path_With_Dir_Async()
+    public async ValueTask GZip_Writer_Entry_Path_With_Dir_Async()
     {
         using (
             Stream stream = File.Open(
@@ -70,7 +83,7 @@ public class GZipWriterAsyncTests : WriterTests
                 FileAccess.Write
             )
         )
-        using (var writer = new GZipWriter(stream))
+        await using (var writer = new GZipWriter(new AsyncOnlyStream(stream)))
         {
             var path = Path.Combine(TEST_ARCHIVES_PATH, "Tar.tar");
             await writer.WriteAsync(path, path);
@@ -79,5 +92,34 @@ public class GZipWriterAsyncTests : WriterTests
             Path.Combine(SCRATCH_FILES_PATH, "Tar.tar.gz"),
             Path.Combine(TEST_ARCHIVES_PATH, "Tar.tar.gz")
         );
+    }
+
+    [Fact]
+    public async ValueTask GZip_Writer_Async_With_System_Provider()
+    {
+        var contents = new byte[] { 1, 2, 3, 4 };
+        var providers = CompressionProviderRegistry.Default.With(
+            new SystemGZipCompressionProvider()
+        );
+        using var source = new MemoryStream(contents);
+        using var destination = new MemoryStream();
+        await using (
+            var writer = new GZipWriter(
+                destination,
+                new GZipWriterOptions { LeaveStreamOpen = true, Providers = providers }
+            )
+        )
+        {
+            await writer.WriteAsync("contents.bin", source);
+        }
+
+        destination.Position = 0;
+        using var compressed = new SystemGZipCompressionProvider().CreateDecompressStream(
+            destination
+        );
+        using var actual = new MemoryStream();
+        compressed.CopyTo(actual);
+
+        Assert.Equal(contents, actual.ToArray());
     }
 }

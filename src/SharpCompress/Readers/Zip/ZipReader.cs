@@ -1,12 +1,15 @@
+using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Threading;
+using System.Threading.Tasks;
 using SharpCompress.Common;
 using SharpCompress.Common.Zip;
 using SharpCompress.Common.Zip.Headers;
 
 namespace SharpCompress.Readers.Zip;
 
-public class ZipReader : AbstractReader<ZipEntry, ZipVolume>
+public partial class ZipReader : AbstractReader<ZipEntry, ZipVolume>
 {
     private readonly StreamingZipHeaderFactory _headerFactory;
 
@@ -17,7 +20,8 @@ public class ZipReader : AbstractReader<ZipEntry, ZipVolume>
         _headerFactory = new StreamingZipHeaderFactory(
             options.Password,
             options.ArchiveEncoding,
-            null
+            null,
+            options.EnableParallelism
         );
     }
 
@@ -28,7 +32,8 @@ public class ZipReader : AbstractReader<ZipEntry, ZipVolume>
         _headerFactory = new StreamingZipHeaderFactory(
             options.Password,
             options.ArchiveEncoding,
-            entries
+            entries,
+            options.EnableParallelism
         );
     }
 
@@ -40,22 +45,22 @@ public class ZipReader : AbstractReader<ZipEntry, ZipVolume>
     /// Opens a ZipReader for Non-seeking usage with a single volume
     /// </summary>
     /// <param name="stream"></param>
-    /// <param name="options"></param>
+    /// <param name="readerOptions"></param>
     /// <returns></returns>
-    public static ZipReader Open(Stream stream, ReaderOptions? options = null)
+    public static IReader OpenReader(Stream stream, ReaderOptions? readerOptions = null)
     {
-        stream.NotNull(nameof(stream));
-        return new ZipReader(stream, options ?? new ReaderOptions());
+        stream.RequireReadable();
+        return new ZipReader(stream, readerOptions ?? ReaderOptions.ForExternalStream);
     }
 
-    public static ZipReader Open(
+    public static IReader OpenReader(
         Stream stream,
         ReaderOptions? options,
         IEnumerable<ZipEntry> entries
     )
     {
-        stream.NotNull(nameof(stream));
-        return new ZipReader(stream, options ?? new ReaderOptions(), entries);
+        stream.RequireReadable();
+        return new ZipReader(stream, options ?? ReaderOptions.ForExternalStream, entries);
     }
 
     #endregion Open
@@ -71,7 +76,12 @@ public class ZipReader : AbstractReader<ZipEntry, ZipVolume>
                     case ZipHeaderType.LocalEntry:
                         {
                             yield return new ZipEntry(
-                                new StreamingZipFilePart((LocalEntryHeader)h, stream)
+                                new StreamingZipFilePart(
+                                    (LocalEntryHeader)h,
+                                    stream,
+                                    Options.Providers
+                                ),
+                                Options
                             );
                         }
                         break;
@@ -91,4 +101,12 @@ public class ZipReader : AbstractReader<ZipEntry, ZipVolume>
             }
         }
     }
+
+    /// <summary>
+    /// Returns entries asynchronously for streams that only support async reads.
+    /// </summary>
+    protected override IAsyncEnumerable<ZipEntry> GetEntriesAsync(Stream stream) =>
+        new ZipEntryAsyncEnumerable(_headerFactory, stream, Options);
+
+    // Async nested classes moved to ZipReader.Async.cs
 }

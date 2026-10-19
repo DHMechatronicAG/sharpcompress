@@ -2,11 +2,9 @@ using System.IO;
 
 namespace SharpCompress.Common.Zip.Headers;
 
-internal class Zip64DirectoryEndLocatorHeader : ZipHeader
+internal partial class Zip64DirectoryEndLocatorHeader()
+    : ZipHeader(ZipHeaderType.Zip64DirectoryEndLocator)
 {
-    public Zip64DirectoryEndLocatorHeader()
-        : base(ZipHeaderType.Zip64DirectoryEndLocator) { }
-
     internal override void Read(BinaryReader reader)
     {
         FirstVolumeWithDirectory = reader.ReadUInt32();

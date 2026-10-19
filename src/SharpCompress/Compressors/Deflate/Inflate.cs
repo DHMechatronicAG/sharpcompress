@@ -64,7 +64,9 @@
 // -----------------------------------------------------------------------
 
 using System;
+using System.Buffers;
 using SharpCompress.Algorithms;
+using SharpCompress.Common;
 
 namespace SharpCompress.Compressors.Deflate;
 
@@ -116,14 +118,15 @@ internal sealed class InflateBlocks
     internal int readAt; // window read pointer
     internal int table; // table lengths (14 bits)
     internal int[] tb = new int[1]; // bit length decoding tree
-    internal byte[] window; // sliding window
+    internal IMemoryOwner<byte> window; // sliding window
     internal int writeAt; // window write pointer
 
     internal InflateBlocks(ZlibCodec codec, object checkfn, int w)
     {
         _codec = codec;
-        hufts = new int[MANY * 3];
-        window = new byte[w];
+        hufts = ArrayPool<int>.Shared.Rent(MANY * 3);
+        Array.Clear(hufts, 0, MANY * 3);
+        window = MemoryPool<byte>.Shared.Rent(w);
         end = w;
         this.checkfn = checkfn;
         mode = InflateBlockMode.TYPE;
@@ -340,7 +343,7 @@ internal sealed class InflateBlocks
                     {
                         t = m;
                     }
-                    Array.Copy(_codec.InputBuffer, p, window, q, t);
+                    _codec.InputBuffer.AsSpan(p, t).CopyTo(window.Memory.Span.Slice(q));
                     p += t;
                     n -= t;
                     q += t;
@@ -715,13 +718,18 @@ internal sealed class InflateBlocks
     internal void Free()
     {
         Reset();
+        window?.Dispose();
         window = null;
-        hufts = null;
+        if (hufts is not null)
+        {
+            ArrayPool<int>.Shared.Return(hufts, clearArray: true);
+            hufts = null;
+        }
     }
 
     internal void SetDictionary(byte[] d, int start, int n)
     {
-        Array.Copy(d, start, window, 0, n);
+        d.AsSpan(start, n).CopyTo(window.Memory.Span.Slice(0, n));
         readAt = writeAt = n;
     }
 
@@ -774,11 +782,16 @@ internal sealed class InflateBlocks
             // update check information
             if (checkfn != null)
             {
-                _codec._adler32 = check = Adler32.Calculate(check, window.AsSpan(readAt, nBytes));
+                _codec._adler32 = check = Adler32.Calculate(
+                    check,
+                    window.Memory.Span.Slice(readAt, nBytes)
+                );
             }
 
             // copy as far as end of window
-            Array.Copy(window, readAt, _codec.OutputBuffer, _codec.NextOut, nBytes);
+            window
+                .Memory.Span.Slice(readAt, nBytes)
+                .CopyTo(_codec.OutputBuffer.AsSpan(_codec.NextOut));
             _codec.NextOut += nBytes;
             readAt += nBytes;
 
@@ -1213,7 +1226,7 @@ internal sealed class InflateCodes
                             }
                         }
 
-                        blocks.window[q++] = blocks.window[f++];
+                        blocks.window.Memory.Span[q++] = blocks.window.Memory.Span[f++];
                         m--;
 
                         if (f == blocks.end)
@@ -1259,7 +1272,7 @@ internal sealed class InflateCodes
                     }
                     r = ZlibConstants.Z_OK;
 
-                    blocks.window[q++] = (byte)lit;
+                    blocks.window.Memory.Span[q++] = (byte)lit;
                     m--;
 
                     mode = START;
@@ -1396,7 +1409,7 @@ internal sealed class InflateCodes
                 b >>= (tp[tp_index_t_3 + 1]);
                 k -= (tp[tp_index_t_3 + 1]);
 
-                s.window[q++] = (byte)tp[tp_index_t_3 + 2];
+                s.window.Memory.Span[q++] = (byte)tp[tp_index_t_3 + 2];
                 m--;
                 continue;
             }
@@ -1461,13 +1474,14 @@ internal sealed class InflateCodes
                                 r = q - d;
                                 if (q - r > 0 && 2 > (q - r))
                                 {
-                                    s.window[q++] = s.window[r++]; // minimum count is three,
-                                    s.window[q++] = s.window[r++]; // so unroll loop a little
+                                    s.window.Memory.Span[q++] = s.window.Memory.Span[r++]; // minimum count is three,
+                                    s.window.Memory.Span[q++] = s.window.Memory.Span[r++]; // so unroll loop a little
                                     c -= 2;
                                 }
                                 else
                                 {
-                                    Array.Copy(s.window, r, s.window, q, 2);
+                                    s.window.Memory.Span.Slice(r, 2)
+                                        .CopyTo(s.window.Memory.Span.Slice(q));
                                     q += 2;
                                     r += 2;
                                     c -= 2;
@@ -1490,12 +1504,13 @@ internal sealed class InflateCodes
                                     {
                                         do
                                         {
-                                            s.window[q++] = s.window[r++];
+                                            s.window.Memory.Span[q++] = s.window.Memory.Span[r++];
                                         } while (--e != 0);
                                     }
                                     else
                                     {
-                                        Array.Copy(s.window, r, s.window, q, e);
+                                        s.window.Memory.Span.Slice(r, e)
+                                            .CopyTo(s.window.Memory.Span.Slice(q));
                                         q += e;
                                         r += e;
                                         e = 0;
@@ -1509,12 +1524,13 @@ internal sealed class InflateCodes
                             {
                                 do
                                 {
-                                    s.window[q++] = s.window[r++];
+                                    s.window.Memory.Span[q++] = s.window.Memory.Span[r++];
                                 } while (--c != 0);
                             }
                             else
                             {
-                                Array.Copy(s.window, r, s.window, q, c);
+                                s.window.Memory.Span.Slice(r, c)
+                                    .CopyTo(s.window.Memory.Span.Slice(q));
                                 q += c;
                                 r += c;
                                 c = 0;
@@ -1560,7 +1576,7 @@ internal sealed class InflateCodes
                     {
                         b >>= (tp[tp_index_t_3 + 1]);
                         k -= (tp[tp_index_t_3 + 1]);
-                        s.window[q++] = (byte)tp[tp_index_t_3 + 2];
+                        s.window.Memory.Span[q++] = (byte)tp[tp_index_t_3 + 2];
                         m--;
                         break;
                     }
@@ -1736,6 +1752,7 @@ internal sealed class InflateManager
                     {
                         mode = InflateManagerMode.BAD;
                         _codec.Message = string.Format(
+                            Constants.DefaultCultureInfo,
                             "unknown compression method (0x{0:X2})",
                             method
                         );
@@ -1746,6 +1763,7 @@ internal sealed class InflateManager
                     {
                         mode = InflateManagerMode.BAD;
                         _codec.Message = string.Format(
+                            Constants.DefaultCultureInfo,
                             "invalid window size ({0})",
                             (method >> 4) + 8
                         );
@@ -1935,7 +1953,13 @@ internal sealed class InflateManager
                     return ZlibConstants.Z_STREAM_END;
 
                 case InflateManagerMode.BAD:
-                    throw new ZlibException(string.Format("Bad state ({0})", _codec.Message));
+                    throw new ZlibException(
+                        string.Format(
+                            Constants.DefaultCultureInfo,
+                            "Bad state ({0})",
+                            _codec.Message
+                        )
+                    );
 
                 default:
                     throw new ZlibException("Stream error.");

@@ -27,36 +27,19 @@
 using System;
 using System.IO;
 using System.Text;
-using System.Threading;
-using System.Threading.Tasks;
+using SharpCompress.Common;
 using SharpCompress.IO;
 
 namespace SharpCompress.Compressors.Deflate;
 
-public class DeflateStream : Stream, IStreamStack
-{
-#if DEBUG_STREAMS
-    long IStreamStack.InstanceId { get; set; }
+public partial class DeflateStream : Stream, IStreamStack
+#if LEGACY_DOTNET
+        , IAsyncDisposable
 #endif
-    int IStreamStack.DefaultBufferSize { get; set; }
-
-    Stream IStreamStack.BaseStream() => _baseStream;
-
-    int IStreamStack.BufferSize
-    {
-        get => 0;
-        set { }
-    }
-    int IStreamStack.BufferPosition
-    {
-        get => 0;
-        set { }
-    }
-
-    void IStreamStack.SetPosition(long position) { }
-
+{
     private readonly ZlibBaseStream _baseStream;
     private bool _disposed;
+    private readonly bool _leaveOpen;
 
     public DeflateStream(
         Stream stream,
@@ -64,18 +47,25 @@ public class DeflateStream : Stream, IStreamStack
         CompressionLevel level = CompressionLevel.Default,
         Encoding? forceEncoding = null
     )
+        : this(stream, mode, level, leaveOpen: false, forceEncoding) { }
+
+    public DeflateStream(
+        Stream stream,
+        CompressionMode mode,
+        CompressionLevel level,
+        bool leaveOpen,
+        Encoding? forceEncoding = null
+    )
     {
+        _leaveOpen = leaveOpen;
         _baseStream = new ZlibBaseStream(
             stream,
             mode,
             level,
             ZlibStreamFlavor.DEFLATE,
+            leaveOpen,
             forceEncoding
         );
-
-#if DEBUG_STREAMS
-        this.DebugConstruct(typeof(DeflateStream));
-#endif
     }
 
     #region Zlib properties
@@ -132,6 +122,7 @@ public class DeflateStream : Stream, IStreamStack
             {
                 throw new ZlibException(
                     string.Format(
+                        Constants.DefaultCultureInfo,
                         "Don't be silly. {0} bytes?? Use a bigger buffer, at least {1}.",
                         value,
                         ZlibConstants.WorkingBufferSizeMin
@@ -262,10 +253,7 @@ public class DeflateStream : Stream, IStreamStack
         {
             if (!_disposed)
             {
-#if DEBUG_STREAMS
-                this.DebugDispose(typeof(DeflateStream));
-#endif
-                if (disposing)
+                if (disposing && !_leaveOpen)
                 {
                     _baseStream?.Dispose();
                 }
@@ -278,111 +266,7 @@ public class DeflateStream : Stream, IStreamStack
         }
     }
 
-    /// <summary>
-    /// Flush the stream.
-    /// </summary>
-    public override void Flush()
-    {
-        if (_disposed)
-        {
-            throw new ObjectDisposedException("DeflateStream");
-        }
-        _baseStream.Flush();
-    }
-
-    public override async Task FlushAsync(CancellationToken cancellationToken)
-    {
-        if (_disposed)
-        {
-            throw new ObjectDisposedException("DeflateStream");
-        }
-        await _baseStream.FlushAsync(cancellationToken).ConfigureAwait(false);
-    }
-
-#if !NETFRAMEWORK && !NETSTANDARD2_0
-    public override async ValueTask DisposeAsync()
-    {
-        if (_disposed)
-        {
-            return;
-        }
-        _disposed = true;
-        if (_baseStream != null)
-        {
-            await _baseStream.DisposeAsync().ConfigureAwait(false);
-        }
-#if DEBUG_STREAMS
-        this.DebugDispose(typeof(DeflateStream));
-#endif
-        await base.DisposeAsync().ConfigureAwait(false);
-    }
-#endif
-
-    /// <summary>
-    /// Read data from the stream.
-    /// </summary>
-    /// <remarks>
-    ///
-    /// <para>
-    ///   If you wish to use the <c>DeflateStream</c> to compress data while
-    ///   reading, you can create a <c>DeflateStream</c> with
-    ///   <c>CompressionMode.Compress</c>, providing an uncompressed data stream.
-    ///   Then call Read() on that <c>DeflateStream</c>, and the data read will be
-    ///   compressed as you read.  If you wish to use the <c>DeflateStream</c> to
-    ///   decompress data while reading, you can create a <c>DeflateStream</c> with
-    ///   <c>CompressionMode.Decompress</c>, providing a readable compressed data
-    ///   stream.  Then call Read() on that <c>DeflateStream</c>, and the data read
-    ///   will be decompressed as you read.
-    /// </para>
-    ///
-    /// <para>
-    ///   A <c>DeflateStream</c> can be used for <c>Read()</c> or <c>Write()</c>, but not both.
-    /// </para>
-    ///
-    /// </remarks>
-    /// <param name="buffer">The buffer into which the read data should be placed.</param>
-    /// <param name="offset">the offset within that data array to put the first byte read.</param>
-    /// <param name="count">the number of bytes to read.</param>
-    /// <returns>the number of bytes actually read</returns>
-    public override int Read(byte[] buffer, int offset, int count)
-    {
-        if (_disposed)
-        {
-            throw new ObjectDisposedException("DeflateStream");
-        }
-
-        return _baseStream.Read(buffer, offset, count);
-    }
-
-    public override async Task<int> ReadAsync(
-        byte[] buffer,
-        int offset,
-        int count,
-        CancellationToken cancellationToken
-    )
-    {
-        if (_disposed)
-        {
-            throw new ObjectDisposedException("DeflateStream");
-        }
-        return await _baseStream
-            .ReadAsync(buffer, offset, count, cancellationToken)
-            .ConfigureAwait(false);
-    }
-
-#if !NETFRAMEWORK && !NETSTANDARD2_0
-    public override async ValueTask<int> ReadAsync(
-        Memory<byte> buffer,
-        CancellationToken cancellationToken = default
-    )
-    {
-        if (_disposed)
-        {
-            throw new ObjectDisposedException("DeflateStream");
-        }
-        return await _baseStream.ReadAsync(buffer, cancellationToken).ConfigureAwait(false);
-    }
-#endif
+    Stream IStreamStack.BaseStream() => _baseStream;
 
     public override int ReadByte()
     {
@@ -406,74 +290,6 @@ public class DeflateStream : Stream, IStreamStack
     /// </summary>
     /// <param name="value">this is irrelevant, since it will always throw!</param>
     public override void SetLength(long value) => throw new NotSupportedException();
-
-    /// <summary>
-    ///   Write data to the stream.
-    /// </summary>
-    /// <remarks>
-    ///
-    /// <para>
-    ///   If you wish to use the <c>DeflateStream</c> to compress data while
-    ///   writing, you can create a <c>DeflateStream</c> with
-    ///   <c>CompressionMode.Compress</c>, and a writable output stream.  Then call
-    ///   <c>Write()</c> on that <c>DeflateStream</c>, providing uncompressed data
-    ///   as input.  The data sent to the output stream will be the compressed form
-    ///   of the data written.  If you wish to use the <c>DeflateStream</c> to
-    ///   decompress data while writing, you can create a <c>DeflateStream</c> with
-    ///   <c>CompressionMode.Decompress</c>, and a writable output stream.  Then
-    ///   call <c>Write()</c> on that stream, providing previously compressed
-    ///   data. The data sent to the output stream will be the decompressed form of
-    ///   the data written.
-    /// </para>
-    ///
-    /// <para>
-    ///   A <c>DeflateStream</c> can be used for <c>Read()</c> or <c>Write()</c>,
-    ///   but not both.
-    /// </para>
-    ///
-    /// </remarks>
-    ///
-    /// <param name="buffer">The buffer holding data to write to the stream.</param>
-    /// <param name="offset">the offset within that data array to find the first byte to write.</param>
-    /// <param name="count">the number of bytes to write.</param>
-    public override void Write(byte[] buffer, int offset, int count)
-    {
-        if (_disposed)
-        {
-            throw new ObjectDisposedException("DeflateStream");
-        }
-        _baseStream.Write(buffer, offset, count);
-    }
-
-    public override async Task WriteAsync(
-        byte[] buffer,
-        int offset,
-        int count,
-        CancellationToken cancellationToken
-    )
-    {
-        if (_disposed)
-        {
-            throw new ObjectDisposedException("DeflateStream");
-        }
-        await _baseStream
-            .WriteAsync(buffer, offset, count, cancellationToken)
-            .ConfigureAwait(false);
-    }
-
-#if !NETFRAMEWORK && !NETSTANDARD2_0
-    public override async ValueTask WriteAsync(
-        ReadOnlyMemory<byte> buffer,
-        CancellationToken cancellationToken = default
-    )
-    {
-        if (_disposed)
-        {
-            throw new ObjectDisposedException("DeflateStream");
-        }
-        await _baseStream.WriteAsync(buffer, cancellationToken).ConfigureAwait(false);
-    }
-#endif
 
     public override void WriteByte(byte value)
     {

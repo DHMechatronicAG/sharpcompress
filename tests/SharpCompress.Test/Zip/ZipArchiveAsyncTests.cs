@@ -2,11 +2,14 @@ using System;
 using System.IO;
 using System.Linq;
 using System.Text;
+using System.Threading;
 using System.Threading.Tasks;
+using SharpCompress;
 using SharpCompress.Archives;
 using SharpCompress.Archives.Zip;
 using SharpCompress.Common;
 using SharpCompress.Compressors.Deflate;
+using SharpCompress.Test.Mocks;
 using SharpCompress.Writers;
 using SharpCompress.Writers.Zip;
 using Xunit;
@@ -18,59 +21,59 @@ public class ZipArchiveAsyncTests : ArchiveTests
     public ZipArchiveAsyncTests() => UseExtensionInsteadOfNameToVerify = true;
 
     [Fact]
-    public async Task Zip_ZipX_ArchiveStreamRead_Async() =>
+    public async ValueTask Zip_ZipX_ArchiveStreamRead_Async() =>
         await ArchiveStreamReadAsync("Zip.zipx");
 
     [Fact]
-    public async Task Zip_BZip2_Streamed_ArchiveStreamRead_Async() =>
+    public async ValueTask Zip_BZip2_Streamed_ArchiveStreamRead_Async() =>
         await ArchiveStreamReadAsync("Zip.bzip2.dd.zip");
 
     [Fact]
-    public async Task Zip_BZip2_ArchiveStreamRead_Async() =>
+    public async ValueTask Zip_BZip2_ArchiveStreamRead_Async() =>
         await ArchiveStreamReadAsync("Zip.bzip2.zip");
 
     [Fact]
-    public async Task Zip_Deflate_Streamed2_ArchiveStreamRead_Async() =>
+    public async ValueTask Zip_Deflate_Streamed2_ArchiveStreamRead_Async() =>
         await ArchiveStreamReadAsync("Zip.deflate.dd-.zip");
 
     [Fact]
-    public async Task Zip_Deflate_Streamed_ArchiveStreamRead_Async() =>
+    public async ValueTask Zip_Deflate_Streamed_ArchiveStreamRead_Async() =>
         await ArchiveStreamReadAsync("Zip.deflate.dd.zip");
 
     [Fact]
-    public async Task Zip_Deflate_ArchiveStreamRead_Async() =>
+    public async ValueTask Zip_Deflate_ArchiveStreamRead_Async() =>
         await ArchiveStreamReadAsync("Zip.deflate.zip");
 
     [Fact]
-    public async Task Zip_Deflate64_ArchiveStreamRead_Async() =>
+    public async ValueTask Zip_Deflate64_ArchiveStreamRead_Async() =>
         await ArchiveStreamReadAsync("Zip.deflate64.zip");
 
     [Fact]
-    public async Task Zip_LZMA_Streamed_ArchiveStreamRead_Async() =>
+    public async ValueTask Zip_LZMA_Streamed_ArchiveStreamRead_Async() =>
         await ArchiveStreamReadAsync("Zip.lzma.dd.zip");
 
     [Fact]
-    public async Task Zip_LZMA_ArchiveStreamRead_Async() =>
+    public async ValueTask Zip_LZMA_ArchiveStreamRead_Async() =>
         await ArchiveStreamReadAsync("Zip.lzma.zip");
 
     [Fact]
-    public async Task Zip_PPMd_Streamed_ArchiveStreamRead_Async() =>
+    public async ValueTask Zip_PPMd_Streamed_ArchiveStreamRead_Async() =>
         await ArchiveStreamReadAsync("Zip.ppmd.dd.zip");
 
     [Fact]
-    public async Task Zip_PPMd_ArchiveStreamRead_Async() =>
+    public async ValueTask Zip_PPMd_ArchiveStreamRead_Async() =>
         await ArchiveStreamReadAsync("Zip.ppmd.zip");
 
     [Fact]
-    public async Task Zip_None_ArchiveStreamRead_Async() =>
+    public async ValueTask Zip_None_ArchiveStreamRead_Async() =>
         await ArchiveStreamReadAsync("Zip.none.zip");
 
     [Fact]
-    public async Task Zip_Zip64_ArchiveStreamRead_Async() =>
+    public async ValueTask Zip_Zip64_ArchiveStreamRead_Async() =>
         await ArchiveStreamReadAsync("Zip.zip64.zip");
 
     [Fact]
-    public async Task Zip_Shrink_ArchiveStreamRead_Async()
+    public async ValueTask Zip_Shrink_ArchiveStreamRead_Async()
     {
         UseExtensionInsteadOfNameToVerify = true;
         UseCaseInsensitiveToVerify = true;
@@ -78,7 +81,7 @@ public class ZipArchiveAsyncTests : ArchiveTests
     }
 
     [Fact]
-    public async Task Zip_Implode_ArchiveStreamRead_Async()
+    public async ValueTask Zip_Implode_ArchiveStreamRead_Async()
     {
         UseExtensionInsteadOfNameToVerify = true;
         UseCaseInsensitiveToVerify = true;
@@ -86,7 +89,7 @@ public class ZipArchiveAsyncTests : ArchiveTests
     }
 
     [Fact]
-    public async Task Zip_Reduce1_ArchiveStreamRead_Async()
+    public async ValueTask Zip_Reduce1_ArchiveStreamRead_Async()
     {
         UseExtensionInsteadOfNameToVerify = true;
         UseCaseInsensitiveToVerify = true;
@@ -94,7 +97,7 @@ public class ZipArchiveAsyncTests : ArchiveTests
     }
 
     [Fact]
-    public async Task Zip_Reduce2_ArchiveStreamRead_Async()
+    public async ValueTask Zip_Reduce2_ArchiveStreamRead_Async()
     {
         UseExtensionInsteadOfNameToVerify = true;
         UseCaseInsensitiveToVerify = true;
@@ -102,7 +105,7 @@ public class ZipArchiveAsyncTests : ArchiveTests
     }
 
     [Fact]
-    public async Task Zip_Reduce3_ArchiveStreamRead_Async()
+    public async ValueTask Zip_Reduce3_ArchiveStreamRead_Async()
     {
         UseExtensionInsteadOfNameToVerify = true;
         UseCaseInsensitiveToVerify = true;
@@ -110,7 +113,7 @@ public class ZipArchiveAsyncTests : ArchiveTests
     }
 
     [Fact]
-    public async Task Zip_Reduce4_ArchiveStreamRead_Async()
+    public async ValueTask Zip_Reduce4_ArchiveStreamRead_Async()
     {
         UseExtensionInsteadOfNameToVerify = true;
         UseCaseInsensitiveToVerify = true;
@@ -118,21 +121,23 @@ public class ZipArchiveAsyncTests : ArchiveTests
     }
 
     [Fact]
-    public async Task Zip_Random_Write_Remove_Async()
+    public async ValueTask Zip_Random_Write_Remove_Async()
     {
         var scratchPath = Path.Combine(SCRATCH_FILES_PATH, "Zip.deflate.mod.zip");
         var unmodified = Path.Combine(TEST_ARCHIVES_PATH, "Zip.deflate.noEmptyDirs.zip");
         var modified = Path.Combine(TEST_ARCHIVES_PATH, "Zip.deflate.mod.zip");
 
-        using (var archive = ZipArchive.Open(unmodified))
+        await using (var archive = await ZipArchive.OpenAsyncArchive(unmodified))
         {
-            var entry = archive.Entries.Single(x =>
+            var entry = await archive.EntriesAsync.SingleAsync(x =>
                 x.Key.NotNull().EndsWith("jpg", StringComparison.OrdinalIgnoreCase)
             );
-            archive.RemoveEntry(entry);
+            await archive.RemoveEntryAsync(entry);
 
-            WriterOptions writerOptions = new ZipWriterOptions(CompressionType.Deflate);
-            writerOptions.ArchiveEncoding.Default = Encoding.GetEncoding(866);
+            var writerOptions = new ZipWriterOptions(CompressionType.Deflate)
+            {
+                ArchiveEncoding = new ArchiveEncoding { Default = Encoding.GetEncoding(866) },
+            };
 
             await archive.SaveToAsync(scratchPath, writerOptions);
         }
@@ -140,19 +145,21 @@ public class ZipArchiveAsyncTests : ArchiveTests
     }
 
     [Fact]
-    public async Task Zip_Random_Write_Add_Async()
+    public async ValueTask Zip_Random_Write_Add_Async()
     {
         var jpg = Path.Combine(ORIGINAL_FILES_PATH, "jpg", "test.jpg");
         var scratchPath = Path.Combine(SCRATCH_FILES_PATH, "Zip.deflate.mod.zip");
         var unmodified = Path.Combine(TEST_ARCHIVES_PATH, "Zip.deflate.mod.zip");
         var modified = Path.Combine(TEST_ARCHIVES_PATH, "Zip.deflate.noEmptyDirs.zip");
 
-        using (var archive = ZipArchive.Open(unmodified))
+        await using (var archive = await ZipArchive.OpenAsyncArchive(unmodified))
         {
-            archive.AddEntry("jpg\\test.jpg", jpg);
+            await archive.AddEntryAsync("jpg\\test.jpg", jpg);
 
-            WriterOptions writerOptions = new ZipWriterOptions(CompressionType.Deflate);
-            writerOptions.ArchiveEncoding.Default = Encoding.GetEncoding(866);
+            var writerOptions = new ZipWriterOptions(CompressionType.Deflate)
+            {
+                ArchiveEncoding = new ArchiveEncoding { Default = Encoding.GetEncoding(866) },
+            };
 
             await archive.SaveToAsync(scratchPath, writerOptions);
         }
@@ -160,18 +167,20 @@ public class ZipArchiveAsyncTests : ArchiveTests
     }
 
     [Fact]
-    public async Task Zip_Create_New_Async()
+    public async ValueTask Zip_Create_New_Async()
     {
         var scratchPath = Path.Combine(SCRATCH_FILES_PATH, "Zip.deflate.noEmptyDirs.zip");
         var unmodified = Path.Combine(TEST_ARCHIVES_PATH, "Zip.deflate.noEmptyDirs.zip");
 
-        using (var archive = ZipArchive.Create())
+        await using (var archive = (ZipArchive)await ZipArchive.CreateAsyncArchive())
         {
             archive.DeflateCompressionLevel = CompressionLevel.BestSpeed;
             archive.AddAllFromDirectory(ORIGINAL_FILES_PATH);
 
-            WriterOptions writerOptions = new ZipWriterOptions(CompressionType.Deflate);
-            writerOptions.ArchiveEncoding.Default = Encoding.UTF8;
+            var writerOptions = new ZipWriterOptions(CompressionType.Deflate)
+            {
+                ArchiveEncoding = new ArchiveEncoding { Default = Encoding.UTF8 },
+            };
 
             await archive.SaveToAsync(scratchPath, writerOptions);
         }
@@ -179,52 +188,167 @@ public class ZipArchiveAsyncTests : ArchiveTests
     }
 
     [Fact]
-    public async Task Zip_Deflate_Entry_Stream_Async()
+    public async ValueTask Zip_Async_Dispose_Closes_New_Entry_Stream()
+    {
+        var entryStream = new TestStream(new MemoryStream(Encoding.UTF8.GetBytes("test")));
+
+        await using (var archive = await ZipArchive.CreateAsyncArchive())
+        {
+            await archive.AddEntryAsync(
+                "test.txt",
+                entryStream,
+                closeStream: true,
+                size: entryStream.Length
+            );
+            await archive.SaveToAsync(
+                new MemoryStream(),
+                new ZipWriterOptions(CompressionType.Deflate)
+            );
+        }
+
+        Assert.True(entryStream.IsDisposed);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async ValueTask Zip_New_Entry_OpenEntryStreamAsync_Rewinds_And_Preserves_Ownership(
+        bool closeStream
+    )
+    {
+        var bytes = Encoding.UTF8.GetBytes("test");
+        using var source = new TestStream(new MemoryStream(bytes));
+        await using (var archive = await ZipArchive.CreateAsyncArchive())
+        {
+            IArchiveEntry entry = await archive.AddEntryAsync(
+                "test.txt",
+                source,
+                closeStream: closeStream,
+                size: source.Length
+            );
+            for (var i = 0; i < 2; i++)
+            {
+                source.Position = source.Length;
+                using (var opened = await entry.OpenEntryStreamAsync(CancellationToken.None))
+                {
+                    using var destination = new MemoryStream();
+                    await opened.CopyToAsync(destination, 81920, CancellationToken.None);
+                    Assert.Equal(bytes, destination.ToArray());
+                }
+                Assert.False(source.IsDisposed);
+            }
+        }
+        Assert.Equal(closeStream, source.IsDisposed);
+    }
+
+    [Fact]
+    public async ValueTask Zip_New_Entry_OpenEntryStreamAsync_Cancelled_Does_Not_Rewind()
+    {
+        using var source = new MemoryStream(Encoding.UTF8.GetBytes("test"));
+        await using var archive = await ZipArchive.CreateAsyncArchive();
+        var entry = await archive.AddEntryAsync("test.txt", source, size: source.Length);
+        source.Position = source.Length;
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+        await Assert.ThrowsAsync<OperationCanceledException>(async () =>
+            await entry.OpenEntryStreamAsync(cancellation.Token)
+        );
+        Assert.Equal(source.Length, source.Position);
+    }
+
+    [Fact]
+    public async ValueTask Zip_New_Directory_OpenEntryStreamAsync()
+    {
+        await using var archive = await ZipArchive.CreateAsyncArchive();
+        var entry = await archive.AddDirectoryEntryAsync("directory");
+        using var opened = await entry.OpenEntryStreamAsync(CancellationToken.None);
+        Assert.Equal(0, opened.Length);
+    }
+
+    [Fact]
+    public async ValueTask Zip_Save_New_Entry_Async_Only_Streams()
+    {
+        using var source = new AsyncOnlyStream(new MemoryStream(Encoding.UTF8.GetBytes("test")));
+        using var destination = new MemoryStream();
+        using var output = new AsyncOnlyStream(destination, disposeStream: false);
+        await using (var archive = await ZipArchive.CreateAsyncArchive())
+        {
+            await archive.AddEntryAsync("test.txt", source, size: source.Length);
+            await archive.SaveToAsync(
+                output,
+                new ZipWriterOptions(CompressionType.Deflate) { LeaveStreamOpen = true },
+                CancellationToken.None
+            );
+        }
+        destination.Position = 0;
+        await using var reopened = await ZipArchive.OpenAsyncArchive(destination);
+        var entry = await reopened.EntriesAsync.SingleAsync();
+        var stream = await entry.OpenEntryStreamAsync(CancellationToken.None);
+        await using var scope = stream.DisposeAsyncScope().ConfigureAwait(false);
+        using var reader = new StreamReader(stream);
+        Assert.Equal("test", await reader.ReadToEndAsync());
+    }
+
+    [Fact]
+    public async ValueTask Zip_Deflate_Entry_Stream_Async()
     {
         using (Stream stream = File.OpenRead(Path.Combine(TEST_ARCHIVES_PATH, "Zip.deflate.zip")))
-        using (var archive = ZipArchive.Open(stream))
         {
-            foreach (var entry in archive.Entries.Where(entry => !entry.IsDirectory))
+            IAsyncArchive archive = await ZipArchive.OpenAsyncArchive(new AsyncOnlyStream(stream));
+            try
             {
-                await entry.WriteToDirectoryAsync(
-                    SCRATCH_FILES_PATH,
-                    new ExtractionOptions { ExtractFullPath = true, Overwrite = true }
-                );
+                await foreach (var entry in archive.EntriesAsync.Where(entry => !entry.IsDirectory))
+                {
+                    await entry.WriteToDirectoryAsync(SCRATCH_FILES_PATH);
+                }
+            }
+            finally
+            {
+                await archive.DisposeAsync();
             }
         }
         VerifyFiles();
     }
 
     [Fact]
-    public async Task Zip_Deflate_Archive_WriteToDirectoryAsync()
+    public async ValueTask Zip_Deflate_Archive_WriteToDirectoryAsync()
     {
         using (Stream stream = File.OpenRead(Path.Combine(TEST_ARCHIVES_PATH, "Zip.deflate.zip")))
-        using (var archive = ZipArchive.Open(stream))
         {
-            await archive.WriteToDirectoryAsync(
-                SCRATCH_FILES_PATH,
-                new ExtractionOptions { ExtractFullPath = true, Overwrite = true }
-            );
+            IAsyncArchive archive = await ZipArchive.OpenAsyncArchive(new AsyncOnlyStream(stream));
+            try
+            {
+                await archive.WriteToDirectoryAsync(SCRATCH_FILES_PATH);
+            }
+            finally
+            {
+                await archive.DisposeAsync();
+            }
         }
         VerifyFiles();
     }
 
     [Fact]
-    public async Task Zip_Deflate_Archive_WriteToDirectoryAsync_WithProgress()
+    public async ValueTask Zip_Deflate_Archive_WriteToDirectoryAsync_WithProgress()
     {
         var progressReports = new System.Collections.Generic.List<ProgressReport>();
         var progress = new Progress<ProgressReport>(report => progressReports.Add(report));
 
+#if NETFRAMEWORK
         using (Stream stream = File.OpenRead(Path.Combine(TEST_ARCHIVES_PATH, "Zip.deflate.zip")))
-        using (var archive = ZipArchive.Open(stream))
+#else
+        await using (
+            Stream stream = File.OpenRead(Path.Combine(TEST_ARCHIVES_PATH, "Zip.deflate.zip"))
+        )
+#endif
         {
-            await archive.WriteToDirectoryAsync(
-                SCRATCH_FILES_PATH,
-                new ExtractionOptions { ExtractFullPath = true, Overwrite = true },
-                progress
+            await using IAsyncArchive archive = await ZipArchive.OpenAsyncArchive(
+                new AsyncOnlyStream(stream)
             );
+            await archive.WriteToDirectoryAsync(SCRATCH_FILES_PATH, progress: progress);
         }
 
+        await Task.Delay(1000);
         VerifyFiles();
         Assert.True(progressReports.Count > 0, "Progress reports should be generated");
     }

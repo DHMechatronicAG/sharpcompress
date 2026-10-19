@@ -1,4 +1,6 @@
 using System.IO;
+using System.Threading.Tasks;
+using SharpCompress.IO;
 
 namespace SharpCompress.Common.Zip.Headers;
 
@@ -8,4 +10,6 @@ internal class IgnoreHeader : ZipHeader
         : base(type) { }
 
     internal override void Read(BinaryReader reader) { }
+
+    internal override ValueTask Read(AsyncBinaryReader reader) => default;
 }

@@ -1,10 +1,5 @@
-﻿#if !Rar2017_64bit
+﻿using System.Buffers;
 using size_t = System.UInt32;
-#else
-using nint = System.Int64;
-using nuint = System.UInt64;
-using size_t = System.UInt64;
-#endif
 
 #nullable disable
 
@@ -22,7 +17,7 @@ internal partial class BitInput
             // read only 1 byte from the last position of buffer and avoid a crash
             // from access to next 3 bytes, which contents we do not need.
             size_t BufSize = MAX_SIZE + 3;
-            InBuf = new byte[BufSize];
+            InBuf = ArrayPool<byte>.Shared.Rent(checked((int)BufSize));
 
             // Ensure that we get predictable results when accessing bytes in area
             // not filled with read data.
@@ -48,4 +43,13 @@ internal partial class BitInput
     public uint fgetbits() =>
         // Function wrapped version of inline getbits to save code size.
         getbits();
+
+    public virtual void Dispose()
+    {
+        if (!ExternalBuffer && InBuf != null)
+        {
+            ArrayPool<byte>.Shared.Return(InBuf);
+            InBuf = null;
+        }
+    }
 }

@@ -3,22 +3,20 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text;
+using System.Threading.Tasks;
 using SharpCompress.Readers;
 using Xunit;
 
 namespace SharpCompress.Test;
 
-public class TestBase : IDisposable
+public class TestBase : IAsyncDisposable
 {
-    private readonly string SOLUTION_BASE_PATH;
-    protected readonly string TEST_ARCHIVES_PATH;
-    protected readonly string ORIGINAL_FILES_PATH;
-    protected readonly string MISC_TEST_FILES_PATH;
-    private readonly string SCRATCH_BASE_PATH;
-    protected readonly string SCRATCH_FILES_PATH;
-    protected readonly string SCRATCH2_FILES_PATH;
+    private static readonly string SOLUTION_BASE_PATH;
+    public static readonly string TEST_ARCHIVES_PATH;
+    public static readonly string ORIGINAL_FILES_PATH;
+    public static readonly string MISC_TEST_FILES_PATH;
 
-    protected TestBase()
+    static TestBase()
     {
         var index = AppDomain.CurrentDomain.BaseDirectory.IndexOf(
             "SharpCompress.Test",
@@ -30,20 +28,42 @@ public class TestBase : IDisposable
         TEST_ARCHIVES_PATH = Path.Combine(SOLUTION_BASE_PATH, "TestArchives", "Archives");
         ORIGINAL_FILES_PATH = Path.Combine(SOLUTION_BASE_PATH, "TestArchives", "Original");
         MISC_TEST_FILES_PATH = Path.Combine(SOLUTION_BASE_PATH, "TestArchives", "MiscTest");
-
-        SCRATCH_BASE_PATH = Path.Combine(
-            SOLUTION_BASE_PATH,
-            "TestArchives",
-            Guid.NewGuid().ToString()
-        );
-        SCRATCH_FILES_PATH = Path.Combine(SCRATCH_BASE_PATH, "Scratch");
-        SCRATCH2_FILES_PATH = Path.Combine(SCRATCH_BASE_PATH, "Scratch2");
-
-        Directory.CreateDirectory(SCRATCH_FILES_PATH);
-        Directory.CreateDirectory(SCRATCH2_FILES_PATH);
     }
 
-    public void Dispose() => Directory.Delete(SCRATCH_BASE_PATH, true);
+    private readonly TempDirectory _tempDirectory;
+    protected readonly string SCRATCH_FILES_PATH;
+    protected readonly string SCRATCH2_FILES_PATH;
+
+    protected TestBase()
+    {
+        _tempDirectory = new TempDirectory("SharpCompress.Test");
+        SCRATCH_FILES_PATH = _tempDirectory.GetDirectory("Scratch");
+        SCRATCH2_FILES_PATH = _tempDirectory.GetDirectory("Scratch2");
+    }
+
+    // Always use async dispose since we have I/O and sync Dispose doesn't wait when using xunit.
+    public ValueTask DisposeAsync() => _tempDirectory.DisposeAsync();
+
+    public void CleanScratch()
+    {
+        _tempDirectory.ResetDirectory("Scratch");
+        _tempDirectory.ResetDirectory("Scratch2");
+    }
+
+    protected string CreateScratchDirectory(string name) =>
+        _tempDirectory.CreateDirectory(Path.Combine("Scratch", name));
+
+    protected string CreateScratch2Directory(string name) =>
+        _tempDirectory.CreateDirectory(Path.Combine("Scratch2", name));
+
+    protected string GetScratchPath(params string[] parts) =>
+        CombinePath(SCRATCH_FILES_PATH, parts);
+
+    protected string GetScratch2Path(params string[] parts) =>
+        CombinePath(SCRATCH2_FILES_PATH, parts);
+
+    private static string CombinePath(string root, string[] parts) =>
+        parts.Length == 0 ? root : Path.Combine(root, Path.Combine(parts));
 
     public void VerifyFiles()
     {
@@ -159,7 +179,7 @@ public class TestBase : IDisposable
             .EnumerateFiles(ORIGINAL_FILES_PATH, "*.*", SearchOption.AllDirectories)
             .ToLookup(path => Path.GetExtension(path));
 
-        Assert.Equal(extracted.Count, original.Count);
+        Assert.Equal(original.Count, extracted.Count);
 
         foreach (var orig in original)
         {
@@ -204,14 +224,14 @@ public class TestBase : IDisposable
 
     protected void CompareArchivesByPath(string file1, string file2, Encoding? encoding = null)
     {
-        var readerOptions = new ReaderOptions { LeaveStreamOpen = false };
+        var readerOptions = ReaderOptions.ForExternalStream.WithLeaveStreamOpen(false);
         readerOptions.ArchiveEncoding.Default = encoding ?? Encoding.Default;
 
         //don't compare the order.  OS X reads files from the file system in a different order therefore makes the archive ordering different
         var archive1Entries = new List<string>();
         var archive2Entries = new List<string>();
-        using (var archive1 = ReaderFactory.Open(File.OpenRead(file1), readerOptions))
-        using (var archive2 = ReaderFactory.Open(File.OpenRead(file2), readerOptions))
+        using (var archive1 = ReaderFactory.OpenReader(File.OpenRead(file1), readerOptions))
+        using (var archive2 = ReaderFactory.OpenReader(File.OpenRead(file2), readerOptions))
         {
             while (archive1.MoveToNextEntry())
             {

@@ -1,54 +1,108 @@
 using System;
-using System.IO;
-using System.Linq;
 using System.Threading.Tasks;
-using SharpCompress.Archives;
-using SharpCompress.Performance;
-using SharpCompress.Readers;
-using SharpCompress.Test;
+using BenchmarkDotNet.Configs;
+using BenchmarkDotNet.Jobs;
+using BenchmarkDotNet.Running;
+using BenchmarkDotNet.Toolchains.InProcess.Emit;
 
-var index = AppDomain.CurrentDomain.BaseDirectory.IndexOf(
-    "SharpCompress.Performance",
-    StringComparison.OrdinalIgnoreCase
-);
-var path = AppDomain.CurrentDomain.BaseDirectory.Substring(0, index);
-var SOLUTION_BASE_PATH = Path.GetDirectoryName(path) ?? throw new ArgumentNullException();
+namespace SharpCompress.Performance;
 
-var TEST_ARCHIVES_PATH = Path.Combine(SOLUTION_BASE_PATH, "TestArchives", "Archives");
-
-//using var _ = JetbrainsProfiler.Memory($"/Users/adam/temp/");
-using (var __ = JetbrainsProfiler.Cpu($"/Users/adam/temp/"))
+public class Program
 {
-    var testArchives = new[]
+    public static async Task Main(string[] args)
     {
-        "Rar.Audio_program.rar",
-
-        //"64bitstream.zip.7z",
-        //"TarWithSymlink.tar.gz"
-    };
-    var arcs = testArchives.Select(a => Path.Combine(TEST_ARCHIVES_PATH, a)).ToArray();
-
-    for (int i = 0; i < 50; i++)
-    {
-        using var found = ArchiveFactory.Open(arcs[0]);
-        foreach (var entry in found.Entries.Where(entry => !entry.IsDirectory))
+        // Check if profiling mode is requested
+        if (args.Length > 0 && args[0].Equals("--profile", StringComparison.OrdinalIgnoreCase))
         {
-            Console.WriteLine($"Extracting {entry.Key}");
-            using var entryStream = entry.OpenEntryStream();
-            entryStream.CopyTo(Stream.Null);
+            await RunWithProfiler(args);
+            return;
         }
-        /*using var found = ReaderFactory.Open(arcs[0]);
-        while (found.MoveToNextEntry())
-        {
-            var entry = found.Entry;
-            if (entry.IsDirectory)
-                continue;
 
-            Console.WriteLine($"Extracting {entry.Key}");
-            found.WriteEntryTo(Stream.Null);
-        }*/
+        // Default: Run BenchmarkDotNet
+        var config = DefaultConfig.Instance.AddJob(
+            Job.Default.WithToolchain(InProcessEmitToolchain.Instance)
+                .WithWarmupCount(5) // Minimal warmup iterations for CI
+                .WithIterationCount(30) // Minimal measurement iterations for CI
+                .WithInvocationCount(30)
+                .WithUnrollFactor(2)
+        );
+
+        BenchmarkSwitcher.FromAssembly(typeof(Program).Assembly).Run(args, config);
     }
 
-    Console.WriteLine("Still running...");
+    private static async Task RunWithProfiler(string[] args)
+    {
+        var profileType = "cpu"; // Default to CPU profiling
+        var outputPath = "./profiler-snapshots";
+
+        // Parse arguments
+        for (int i = 1; i < args.Length; i++)
+        {
+            if (args[i].Equals("--type", StringComparison.OrdinalIgnoreCase) && i + 1 < args.Length)
+            {
+                profileType = args[++i].ToLowerInvariant();
+            }
+            else if (
+                args[i].Equals("--output", StringComparison.OrdinalIgnoreCase)
+                && i + 1 < args.Length
+            )
+            {
+                outputPath = args[++i];
+            }
+        }
+
+        Console.WriteLine($"Running with JetBrains Profiler ({profileType} mode)");
+        Console.WriteLine($"Output path: {outputPath}");
+        Console.WriteLine();
+        Console.WriteLine(
+            "Usage: dotnet run --project SharpCompress.Performance.csproj -c Release -- --profile [--type cpu|memory] [--output <path>]"
+        );
+        Console.WriteLine();
+
+        // Run a sample benchmark with profiling
+        await RunSampleBenchmarkWithProfiler(profileType, outputPath);
+    }
+
+    private static async Task RunSampleBenchmarkWithProfiler(string profileType, string outputPath)
+    {
+        try
+        {
+            IDisposable? profiler = null;
+
+            if (profileType == "cpu")
+            {
+                profiler = Test.JetbrainsProfiler.Cpu(outputPath);
+            }
+            else if (profileType == "memory")
+            {
+                profiler = Test.JetbrainsProfiler.Memory(outputPath);
+            }
+
+            using (profiler)
+            {
+                // Run a simple benchmark iteration
+                var zipBenchmark = new Benchmarks.RarBenchmarks();
+                zipBenchmark.Setup();
+
+                Console.WriteLine("Running benchmark iterations...");
+                for (int i = 0; i < 100; i++)
+                {
+                    await zipBenchmark.RarExtractArchiveApiAsync();
+                    if (i % 3 == 0)
+                    {
+                        Console.Write(".");
+                    }
+                }
+                Console.WriteLine();
+                Console.WriteLine("Benchmark iterations completed.");
+            }
+
+            Console.WriteLine($"Profiler snapshot saved to: {outputPath}");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Error running profiler: {ex.Message}");
+            Console.WriteLine("Make sure JetBrains profiler tools are installed and accessible.");
+        }
+    }
 }
-await Task.Delay(500);

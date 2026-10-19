@@ -7,7 +7,9 @@ using System.Threading.Tasks;
 using SharpCompress.Archives;
 using SharpCompress.Archives.Zip;
 using SharpCompress.Common;
+using SharpCompress.IO;
 using SharpCompress.Readers;
+using SharpCompress.Test.Mocks;
 using SharpCompress.Writers;
 using SharpCompress.Writers.Tar;
 using SharpCompress.Writers.Zip;
@@ -106,9 +108,9 @@ public class ProgressReportTests : TestBase
 
         // Now read it with progress reporting
         archiveStream.Position = 0;
-        var readerOptions = new ReaderOptions { Progress = progress };
+        var readerOptions = ReaderOptions.ForExternalStream.WithProgress(progress);
 
-        using (var reader = ReaderFactory.Open(archiveStream, readerOptions))
+        using (var reader = ReaderFactory.OpenReader(archiveStream, readerOptions))
         {
             while (reader.MoveToNextEntry())
             {
@@ -146,7 +148,7 @@ public class ProgressReportTests : TestBase
         // Now open as archive and extract entry with progress as parameter
         archiveStream.Position = 0;
 
-        using var archive = ZipArchive.Open(archiveStream);
+        using var archive = ZipArchive.OpenArchive(archiveStream);
         foreach (var entry in archive.Entries)
         {
             if (!entry.IsDirectory)
@@ -164,7 +166,7 @@ public class ProgressReportTests : TestBase
     }
 
     [Fact]
-    public async Task ZipArchive_Entry_WriteToAsync_ReportsProgress()
+    public async ValueTask ZipArchive_Entry_WriteToAsync_ReportsProgress()
     {
         var progress = new TestProgress<ProgressReport>();
 
@@ -182,7 +184,7 @@ public class ProgressReportTests : TestBase
         // Now open as archive and extract entry async with progress as parameter
         archiveStream.Position = 0;
 
-        using var archive = ZipArchive.Open(archiveStream);
+        using var archive = ZipArchive.OpenArchive(archiveStream);
         foreach (var entry in archive.Entries)
         {
             if (!entry.IsDirectory)
@@ -232,10 +234,10 @@ public class ProgressReportTests : TestBase
 
         // Read without progress
         archiveStream.Position = 0;
-        var readerOptions = new ReaderOptions();
+        var readerOptions = ReaderOptions.ForExternalStream;
         Assert.Null(readerOptions.Progress);
 
-        using (var reader = ReaderFactory.Open(archiveStream, readerOptions))
+        using (var reader = ReaderFactory.OpenReader(archiveStream, readerOptions))
         {
             while (reader.MoveToNextEntry())
             {
@@ -265,7 +267,7 @@ public class ProgressReportTests : TestBase
         // Open archive and extract without progress
         archiveStream.Position = 0;
 
-        using var archive = ZipArchive.Open(archiveStream);
+        using var archive = ZipArchive.OpenArchive(archiveStream);
         foreach (var entry in archive.Entries)
         {
             if (!entry.IsDirectory)
@@ -322,9 +324,9 @@ public class ProgressReportTests : TestBase
 
         // Now read it with progress reporting
         archiveStream.Position = 0;
-        var readerOptions = new ReaderOptions { Progress = progress };
+        var readerOptions = ReaderOptions.ForExternalStream.WithProgress(progress);
 
-        using (var reader = ReaderFactory.Open(archiveStream, readerOptions))
+        using (var reader = ReaderFactory.OpenReader(archiveStream, readerOptions))
         {
             while (reader.MoveToNextEntry())
             {
@@ -365,7 +367,7 @@ public class ProgressReportTests : TestBase
         // Now open as archive and extract entry with progress as parameter
         archiveStream.Position = 0;
 
-        using var archive = SharpCompress.Archives.Tar.TarArchive.Open(archiveStream);
+        using var archive = SharpCompress.Archives.Tar.TarArchive.OpenArchive(archiveStream);
         foreach (var entry in archive.Entries)
         {
             if (!entry.IsDirectory)
@@ -383,7 +385,7 @@ public class ProgressReportTests : TestBase
     }
 
     [Fact]
-    public async Task TarArchive_Entry_WriteToAsync_ReportsProgress()
+    public async ValueTask TarArchive_Entry_WriteToAsync_ReportsProgress()
     {
         var progress = new TestProgress<ProgressReport>();
 
@@ -404,7 +406,7 @@ public class ProgressReportTests : TestBase
         // Now open as archive and extract entry async with progress as parameter
         archiveStream.Position = 0;
 
-        using var archive = SharpCompress.Archives.Tar.TarArchive.Open(archiveStream);
+        using var archive = SharpCompress.Archives.Tar.TarArchive.OpenArchive(archiveStream);
         foreach (var entry in archive.Entries)
         {
             if (!entry.IsDirectory)
@@ -443,9 +445,9 @@ public class ProgressReportTests : TestBase
 
         // Now read it with progress reporting
         archiveStream.Position = 0;
-        var readerOptions = new ReaderOptions { Progress = progress };
+        var readerOptions = ReaderOptions.ForExternalStream.WithProgress(progress);
 
-        using (var reader = ReaderFactory.Open(archiveStream, readerOptions))
+        using (var reader = ReaderFactory.OpenReader(archiveStream, readerOptions))
         {
             while (reader.MoveToNextEntry())
             {
@@ -494,7 +496,7 @@ public class ProgressReportTests : TestBase
         // Now open as archive and extract entries with progress as parameter
         archiveStream.Position = 0;
 
-        using var archive = ZipArchive.Open(archiveStream);
+        using var archive = ZipArchive.OpenArchive(archiveStream);
         foreach (var entry in archive.Entries)
         {
             if (!entry.IsDirectory)
@@ -519,7 +521,7 @@ public class ProgressReportTests : TestBase
     }
 
     [Fact]
-    public async Task Zip_ReadAsync_ReportsProgress()
+    public async ValueTask Zip_ReadAsync_ReportsProgress()
     {
         var progress = new TestProgress<ProgressReport>();
 
@@ -536,11 +538,16 @@ public class ProgressReportTests : TestBase
 
         // Now read it with progress reporting
         archiveStream.Position = 0;
-        var readerOptions = new ReaderOptions { Progress = progress };
+        var readerOptions = ReaderOptions.ForExternalStream.WithProgress(progress);
 
-        using (var reader = ReaderFactory.Open(archiveStream, readerOptions))
+        await using (
+            var reader = await ReaderFactory.OpenAsyncReader(
+                new AsyncOnlyStream(archiveStream),
+                readerOptions
+            )
+        )
         {
-            while (reader.MoveToNextEntry())
+            while (await reader.MoveToNextEntryAsync())
             {
                 if (!reader.Entry.IsDirectory)
                 {
@@ -582,7 +589,7 @@ public class ProgressReportTests : TestBase
     }
 
     [Fact]
-    public async Task Tar_WriteAsync_ReportsProgress()
+    public async ValueTask Tar_WriteAsync_ReportsProgress()
     {
         var progress = new TestProgress<ProgressReport>();
 

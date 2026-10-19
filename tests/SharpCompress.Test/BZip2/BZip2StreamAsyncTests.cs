@@ -4,6 +4,7 @@ using System.IO;
 using System.Text;
 using System.Threading.Tasks;
 using SharpCompress.Compressors.BZip2;
+using SharpCompress.Test.Mocks;
 using Xunit;
 
 namespace SharpCompress.Test.BZip2;
@@ -22,7 +23,7 @@ public class BZip2StreamAsyncTests
     }
 
     [Fact]
-    public async Task BZip2CompressDecompressAsyncTest()
+    public async ValueTask BZip2CompressDecompressAsyncTest()
     {
         var testData = CreateTestData(10000);
         byte[] compressed;
@@ -30,16 +31,15 @@ public class BZip2StreamAsyncTests
         // Compress
         using (var memoryStream = new MemoryStream())
         {
-            using (
-                var bzip2Stream = new BZip2Stream(
-                    memoryStream,
+            await using (
+                var bzip2Stream = await BZip2Stream.CreateAsync(
+                    new AsyncOnlyStream(memoryStream),
                     SharpCompress.Compressors.CompressionMode.Compress,
                     false
                 )
             )
             {
                 await bzip2Stream.WriteAsync(testData, 0, testData.Length);
-                (bzip2Stream as BZip2Stream)?.Finish();
             }
             compressed = memoryStream.ToArray();
         }
@@ -53,8 +53,8 @@ public class BZip2StreamAsyncTests
         using (var memoryStream = new MemoryStream(compressed))
         {
             using (
-                var bzip2Stream = new BZip2Stream(
-                    memoryStream,
+                var bzip2Stream = await BZip2Stream.CreateAsync(
+                    new AsyncOnlyStream(memoryStream),
                     SharpCompress.Compressors.CompressionMode.Decompress,
                     false
                 )
@@ -83,7 +83,7 @@ public class BZip2StreamAsyncTests
     }
 
     [Fact]
-    public async Task BZip2ReadAsyncWithCancellationTest()
+    public async ValueTask BZip2ReadAsyncWithCancellationTest()
     {
         var testData = Encoding.ASCII.GetBytes(new string('A', 5000)); // Repetitive data compresses well
         byte[] compressed;
@@ -91,16 +91,15 @@ public class BZip2StreamAsyncTests
         // Compress
         using (var memoryStream = new MemoryStream())
         {
-            using (
-                var bzip2Stream = new BZip2Stream(
-                    memoryStream,
+            await using (
+                var bzip2Stream = await BZip2Stream.CreateAsync(
+                    new AsyncOnlyStream(memoryStream),
                     SharpCompress.Compressors.CompressionMode.Compress,
                     false
                 )
             )
             {
                 await bzip2Stream.WriteAsync(testData, 0, testData.Length);
-                (bzip2Stream as BZip2Stream)?.Finish();
             }
             compressed = memoryStream.ToArray();
         }
@@ -109,8 +108,8 @@ public class BZip2StreamAsyncTests
         using (var memoryStream = new MemoryStream(compressed))
         {
             using (
-                var bzip2Stream = new BZip2Stream(
-                    memoryStream,
+                var bzip2Stream = await BZip2Stream.CreateAsync(
+                    new AsyncOnlyStream(memoryStream),
                     SharpCompress.Compressors.CompressionMode.Decompress,
                     false
                 )
@@ -127,13 +126,13 @@ public class BZip2StreamAsyncTests
     }
 
     [Fact]
-    public async Task BZip2MultipleAsyncWritesTest()
+    public async ValueTask BZip2MultipleAsyncWritesTest()
     {
         using (var memoryStream = new MemoryStream())
         {
-            using (
-                var bzip2Stream = new BZip2Stream(
-                    memoryStream,
+            await using (
+                var bzip2Stream = await BZip2Stream.CreateAsync(
+                    new AsyncOnlyStream(memoryStream),
                     SharpCompress.Compressors.CompressionMode.Compress,
                     false
                 )
@@ -146,19 +145,18 @@ public class BZip2StreamAsyncTests
                 await bzip2Stream.WriteAsync(data1, 0, data1.Length);
                 await bzip2Stream.WriteAsync(data2, 0, data2.Length);
                 await bzip2Stream.WriteAsync(data3, 0, data3.Length);
-
-                (bzip2Stream as BZip2Stream)?.Finish();
             }
 
             var compressed = memoryStream.ToArray();
             Assert.True(compressed.Length > 0);
 
             // Decompress and verify
+            // MemoryStream has nothing to dispose asynchronously
             using (var readStream = new MemoryStream(compressed))
             {
-                using (
-                    var bzip2Stream = new BZip2Stream(
-                        readStream,
+                await using (
+                    var bzip2Stream = await BZip2Stream.CreateAsync(
+                        new AsyncOnlyStream(readStream),
                         SharpCompress.Compressors.CompressionMode.Decompress,
                         false
                     )
@@ -179,7 +177,7 @@ public class BZip2StreamAsyncTests
     }
 
     [Fact]
-    public async Task BZip2LargeDataAsyncTest()
+    public async ValueTask BZip2LargeDataAsyncTest()
     {
         var largeData = CreateTestData(100000);
 
@@ -187,16 +185,15 @@ public class BZip2StreamAsyncTests
         byte[] compressed;
         using (var memoryStream = new MemoryStream())
         {
-            using (
-                var bzip2Stream = new BZip2Stream(
-                    memoryStream,
+            await using (
+                var bzip2Stream = await BZip2Stream.CreateAsync(
+                    new AsyncOnlyStream(memoryStream),
                     SharpCompress.Compressors.CompressionMode.Compress,
                     false
                 )
             )
             {
                 await bzip2Stream.WriteAsync(largeData, 0, largeData.Length);
-                (bzip2Stream as BZip2Stream)?.Finish();
             }
             compressed = memoryStream.ToArray();
         }
@@ -206,8 +203,8 @@ public class BZip2StreamAsyncTests
         using (var memoryStream = new MemoryStream(compressed))
         {
             using (
-                var bzip2Stream = new BZip2Stream(
-                    memoryStream,
+                var bzip2Stream = await BZip2Stream.CreateAsync(
+                    new AsyncOnlyStream(memoryStream),
                     SharpCompress.Compressors.CompressionMode.Decompress,
                     false
                 )

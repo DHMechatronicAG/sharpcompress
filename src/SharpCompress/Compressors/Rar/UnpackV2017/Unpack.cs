@@ -1,13 +1,10 @@
 using System;
+using System.Buffers;
 using System.IO;
+using System.Threading;
+using System.Threading.Tasks;
 using SharpCompress.Common.Rar.Headers;
-#if !Rar2017_64bit
 using size_t = System.UInt32;
-#else
-using nint = System.Int64;
-using nuint = System.UInt64;
-using size_t = System.UInt64;
-#endif
 
 namespace SharpCompress.Compressors.Rar.UnpackV2017;
 
@@ -29,11 +26,11 @@ internal partial class Unpack : IRarUnpack
         // NOTE: caller has logic to check for -1 for error we throw instead.
         readStream.Read(buf, offset, count);
 
-    private async System.Threading.Tasks.Task<int> UnpIO_UnpReadAsync(
+    private async ValueTask<int> UnpIO_UnpReadAsync(
         byte[] buf,
         int offset,
         int count,
-        System.Threading.CancellationToken cancellationToken = default
+        CancellationToken cancellationToken = default
     ) =>
         // NOTE: caller has logic to check for -1 for error we throw instead.
         await readStream.ReadAsync(buf, offset, count, cancellationToken).ConfigureAwait(false);
@@ -41,11 +38,11 @@ internal partial class Unpack : IRarUnpack
     private void UnpIO_UnpWrite(byte[] buf, size_t offset, uint count) =>
         writeStream.Write(buf, checked((int)offset), checked((int)count));
 
-    private async System.Threading.Tasks.Task UnpIO_UnpWriteAsync(
+    private async ValueTask UnpIO_UnpWriteAsync(
         byte[] buf,
         size_t offset,
         uint count,
-        System.Threading.CancellationToken cancellationToken = default
+        CancellationToken cancellationToken = default
     ) =>
         await writeStream
             .WriteAsync(buf, checked((int)offset), checked((int)count), cancellationToken)
@@ -72,11 +69,11 @@ internal partial class Unpack : IRarUnpack
         DoUnpack();
     }
 
-    public async System.Threading.Tasks.Task DoUnpackAsync(
+    public async ValueTask DoUnpackAsync(
         FileHeader fileHeader,
         Stream readStream,
         Stream writeStream,
-        System.Threading.CancellationToken cancellationToken = default
+        CancellationToken cancellationToken = default
     )
     {
         DestUnpSize = fileHeader.UncompressedSize;
@@ -103,9 +100,7 @@ internal partial class Unpack : IRarUnpack
         }
     }
 
-    public async System.Threading.Tasks.Task DoUnpackAsync(
-        System.Threading.CancellationToken cancellationToken = default
-    )
+    public async ValueTask DoUnpackAsync(CancellationToken cancellationToken = default)
     {
         if (fileHeader.IsStored)
         {
@@ -139,40 +134,53 @@ internal partial class Unpack : IRarUnpack
         } while (!Suspended);
     }
 
-    private async System.Threading.Tasks.Task UnstoreFileAsync(
-        System.Threading.CancellationToken cancellationToken = default
-    )
+    private async ValueTask UnstoreFileAsync(CancellationToken cancellationToken = default)
     {
-        var buffer = new byte[(int)Math.Min(0x10000, DestUnpSize)];
-        do
+        var buffer = ArrayPool<byte>.Shared.Rent((int)Math.Min(0x10000, DestUnpSize));
+        try
         {
-            var n = await readStream
-                .ReadAsync(buffer, 0, buffer.Length, cancellationToken)
-                .ConfigureAwait(false);
-            if (n == 0)
+            do
             {
-                break;
-            }
-            await writeStream.WriteAsync(buffer, 0, n, cancellationToken).ConfigureAwait(false);
-            DestUnpSize -= n;
-        } while (!Suspended);
+                var n = await readStream
+                    .ReadAsync(buffer, 0, buffer.Length, cancellationToken)
+                    .ConfigureAwait(false);
+                if (n == 0)
+                {
+                    break;
+                }
+                await writeStream.WriteAsync(buffer, 0, n, cancellationToken).ConfigureAwait(false);
+                DestUnpSize -= n;
+            } while (!Suspended);
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(buffer);
+        }
     }
 
     public bool Suspended { get; set; }
 
     public long DestSize => DestUnpSize;
 
-    public int Char
+    public int ReadChar()
     {
-        get
+        // TODO: coderb: not sure where the "MAXSIZE-30" comes from, ported from V1 code
+        if (InAddr > MAX_SIZE - 30)
         {
-            // TODO: coderb: not sure where the "MAXSIZE-30" comes from, ported from V1 code
-            if (InAddr > MAX_SIZE - 30)
-            {
-                UnpReadBuf();
-            }
-            return InBuf[InAddr++];
+            UnpReadBuf();
         }
+        return InBuf[InAddr++];
+    }
+
+    public async ValueTask<int> ReadCharAsync(CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        // TODO: coderb: not sure where the "MAXSIZE-30" comes from, ported from V1 code
+        if (InAddr > MAX_SIZE - 30)
+        {
+            await UnpReadBufAsync(cancellationToken).ConfigureAwait(false);
+        }
+        return InBuf[InAddr++];
     }
 
     public int PpmEscChar
@@ -181,6 +189,18 @@ internal partial class Unpack : IRarUnpack
         set => PPMEscChar = value;
     }
 
-    public static byte[] EnsureCapacity(byte[] array, int length) =>
-        array.Length < length ? new byte[length] : array;
+    private byte[] EnsureCapacity(byte[] array, int length)
+    {
+        if (array.Length >= length)
+        {
+            return array;
+        }
+
+        var newArray = ArrayPool<byte>.Shared.Rent(length);
+        if (array.Length != 0)
+        {
+            ArrayPool<byte>.Shared.Return(array);
+        }
+        return newArray;
+    }
 }

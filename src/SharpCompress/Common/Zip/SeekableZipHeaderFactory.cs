@@ -1,12 +1,14 @@
 using System;
+using System.Buffers;
 using System.Collections.Generic;
 using System.IO;
+using System.Threading.Tasks;
 using SharpCompress.Common.Zip.Headers;
 using SharpCompress.IO;
 
 namespace SharpCompress.Common.Zip;
 
-internal sealed class SeekableZipHeaderFactory : ZipHeaderFactory
+internal sealed partial class SeekableZipHeaderFactory : ZipHeaderFactory
 {
     private const int MINIMUM_EOCD_LENGTH = 22;
     private const int ZIP64_EOCD_LENGTH = 20;
@@ -15,6 +17,8 @@ internal sealed class SeekableZipHeaderFactory : ZipHeaderFactory
     private const int MAX_SEARCH_LENGTH_FOR_EOCD = 65557;
     private bool _zip64;
 
+    private static readonly byte[] needle = { 0x06, 0x05, 0x4b, 0x50 };
+
     internal SeekableZipHeaderFactory(string? password, IArchiveEncoding archiveEncoding)
         : base(StreamingMode.Seekable, password, archiveEncoding) { }
 
@@ -22,7 +26,7 @@ internal sealed class SeekableZipHeaderFactory : ZipHeaderFactory
     {
         var reader = new BinaryReader(stream);
 
-        SeekBackToHeader(stream, reader);
+        SeekBackToHeader(stream);
 
         var eocd_location = stream.Position;
         var entry = new DirectoryEndHeader();
@@ -85,7 +89,7 @@ internal sealed class SeekableZipHeaderFactory : ZipHeaderFactory
         }
     }
 
-    private static bool IsMatch(byte[] haystack, int position, byte[] needle)
+    private static bool IsMatch(Span<byte> haystack, int position, byte[] needle)
     {
         for (var i = 0; i < needle.Length; i++)
         {
@@ -98,7 +102,7 @@ internal sealed class SeekableZipHeaderFactory : ZipHeaderFactory
         return true;
     }
 
-    private static void SeekBackToHeader(Stream stream, BinaryReader reader)
+    private static void SeekBackToHeader(Stream stream)
     {
         // Minimum EOCD length
         if (stream.Length < MINIMUM_EOCD_LENGTH)
@@ -112,29 +116,32 @@ internal sealed class SeekableZipHeaderFactory : ZipHeaderFactory
             stream.Length < MAX_SEARCH_LENGTH_FOR_EOCD
                 ? (int)stream.Length
                 : MAX_SEARCH_LENGTH_FOR_EOCD;
-        // We search for marker in reverse to find the first occurance
-        byte[] needle = { 0x06, 0x05, 0x4b, 0x50 };
-
         stream.Seek(-len, SeekOrigin.End);
 
-        var seek = reader.ReadBytes(len);
-
-        // Search in reverse
-        Array.Reverse(seek);
-
-        // don't exclude the minimum eocd region, otherwise you fail to locate the header in empty zip files
-        var max_search_area = len; // - MINIMUM_EOCD_LENGTH;
-
-        for (var pos_from_end = 0; pos_from_end < max_search_area; ++pos_from_end)
+        var seek = ArrayPool<byte>.Shared.Rent(len);
+        try
         {
-            if (IsMatch(seek, pos_from_end, needle))
-            {
-                stream.Seek(-pos_from_end, SeekOrigin.End);
-                return;
-            }
-        }
+            stream.ReadExact(seek, 0, len);
+            // Only reverse and search the bytes read, not the unused tail of a pooled array.
+            var span = seek.AsSpan(0, len);
+            span.Reverse();
 
-        throw new ArchiveException("Failed to locate the Zip Header");
+            // Include the minimum EOCD region so empty ZIP archives can be found.
+            for (var pos_from_end = 0; pos_from_end <= len - needle.Length; ++pos_from_end)
+            {
+                if (IsMatch(span, pos_from_end, needle))
+                {
+                    stream.Seek(-pos_from_end, SeekOrigin.End);
+                    return;
+                }
+            }
+
+            throw new ArchiveException("Failed to locate the Zip Header");
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(seek);
+        }
     }
 
     internal LocalEntryHeader GetLocalHeader(
@@ -145,11 +152,40 @@ internal sealed class SeekableZipHeaderFactory : ZipHeaderFactory
         stream.Seek(directoryEntryHeader.RelativeOffsetOfEntryHeader, SeekOrigin.Begin);
         var reader = new BinaryReader(stream);
         var signature = reader.ReadUInt32();
-        if (ReadHeader(signature, reader, _zip64) is not LocalEntryHeader localEntryHeader)
+        if (signature != ENTRY_HEADER_BYTES)
         {
-            throw new InvalidOperationException();
+            throw new ArchiveOperationException();
         }
 
+        // Sizes written to a data descriptor are only known from the central directory and are
+        // needed before the encryption header is loaded.
+        var localEntryHeader = ReadLocalHeader(reader);
+        PopulateDirectoryEntryMetadata(localEntryHeader, directoryEntryHeader);
+        LoadHeader(localEntryHeader, stream);
+        return localEntryHeader;
+    }
+
+    internal LocalEntryHeader GetRawLocalHeader(
+        Stream stream,
+        DirectoryEntryHeader directoryEntryHeader
+    )
+    {
+        stream.Seek(directoryEntryHeader.RelativeOffsetOfEntryHeader, SeekOrigin.Begin);
+        var reader = new BinaryReader(stream);
+        var signature = reader.ReadUInt32();
+        if (signature != ENTRY_HEADER_BYTES)
+        {
+            throw new ArchiveOperationException();
+        }
+
+        return ReadLocalHeader(reader);
+    }
+
+    private static void PopulateDirectoryEntryMetadata(
+        LocalEntryHeader localEntryHeader,
+        DirectoryEntryHeader directoryEntryHeader
+    )
+    {
         // populate fields only known from the DirectoryEntryHeader
         localEntryHeader.HasData = directoryEntryHeader.HasData;
         localEntryHeader.ExternalFileAttributes = directoryEntryHeader.ExternalFileAttributes;
@@ -158,9 +194,9 @@ internal sealed class SeekableZipHeaderFactory : ZipHeaderFactory
         if (FlagUtility.HasFlag(localEntryHeader.Flags, HeaderFlags.UsePostDataDescriptor))
         {
             localEntryHeader.Crc = directoryEntryHeader.Crc;
+            localEntryHeader.IsCrcAvailable = true;
             localEntryHeader.CompressedSize = directoryEntryHeader.CompressedSize;
             localEntryHeader.UncompressedSize = directoryEntryHeader.UncompressedSize;
         }
-        return localEntryHeader;
     }
 }

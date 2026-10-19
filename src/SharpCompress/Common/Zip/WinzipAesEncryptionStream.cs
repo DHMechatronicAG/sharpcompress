@@ -3,6 +3,8 @@ using System.Buffers.Binary;
 using System.IO;
 using System.Security.Cryptography;
 using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
 using SharpCompress.IO;
 
 namespace SharpCompress.Common.Zip;
@@ -10,22 +12,24 @@ namespace SharpCompress.Common.Zip;
 /// <summary>
 /// Stream that encrypts data using WinZip AES encryption and writes to an underlying stream.
 /// </summary>
-internal class WinzipAesEncryptionStream : Stream
+internal partial class WinzipAesEncryptionStream : Stream, IAsyncDisposable
 {
     private const int BLOCK_SIZE_IN_BYTES = 16;
     private const int RFC2898_ITERATIONS = 1000;
     private const int AUTH_CODE_LENGTH = 10;
 
     private readonly Stream _stream;
-    private readonly SymmetricAlgorithm _cipher;
+    private readonly Aes _cipher;
     private readonly ICryptoTransform _transform;
     private readonly HMACSHA1 _hmac;
     private readonly byte[] _counter = new byte[BLOCK_SIZE_IN_BYTES];
     private readonly byte[] _counterOut = new byte[BLOCK_SIZE_IN_BYTES];
     private int _nonce = 1;
+    private int _keyStreamOffset = BLOCK_SIZE_IN_BYTES;
+    private readonly byte[] _header;
     private bool _isDisposed;
 
-    internal WinzipAesEncryptionStream(Stream stream, string password, WinzipAesKeySize keySize)
+    private WinzipAesEncryptionStream(Stream stream, string password, WinzipAesKeySize keySize)
     {
         _stream = stream;
 
@@ -37,11 +41,13 @@ internal class WinzipAesEncryptionStream : Stream
             rng.GetBytes(salt);
         }
 
+        // WinZip AES requires PBKDF2-HMAC-SHA1; changing the hash breaks the format.
+#pragma warning disable CA5379
         // Derive keys using PBKDF2
         var keyLength = GetKeyLength(keySize);
 
 #if NETFRAMEWORK || NETSTANDARD2_0
-        var rfc2898 = new Rfc2898DeriveBytes(password, salt, RFC2898_ITERATIONS);
+        using var rfc2898 = new Rfc2898DeriveBytes(password, salt, RFC2898_ITERATIONS);
         var keyBytes = rfc2898.GetBytes(keyLength);
         var ivBytes = rfc2898.GetBytes(keyLength);
         var passwordVerifyValue = rfc2898.GetBytes(2);
@@ -59,7 +65,7 @@ internal class WinzipAesEncryptionStream : Stream
         var ivBytes = derivedKey.AsSpan(keyLength, keyLength).ToArray();
         var passwordVerifyValue = derivedKey.AsSpan(keyLength * 2, 2).ToArray();
 #else
-        var rfc2898 = new Rfc2898DeriveBytes(
+        using var rfc2898 = new Rfc2898DeriveBytes(
             password,
             salt,
             RFC2898_ITERATIONS,
@@ -70,17 +76,47 @@ internal class WinzipAesEncryptionStream : Stream
         var passwordVerifyValue = rfc2898.GetBytes(2);
 #endif
 
+#pragma warning restore CA5379
         // Initialize cipher
         _cipher = CreateCipher(keyBytes);
         var iv = new byte[BLOCK_SIZE_IN_BYTES];
         _transform = _cipher.CreateEncryptor(keyBytes, iv);
 
         // Initialize HMAC for authentication
+        // WinZip AES mandates HMAC-SHA1 for interoperability.
+#pragma warning disable CA5350
         _hmac = new HMACSHA1(ivBytes);
+#pragma warning restore CA5350
 
         // Write salt and password verification value
-        _stream.Write(salt, 0, salt.Length);
-        _stream.Write(passwordVerifyValue, 0, passwordVerifyValue.Length);
+        _header = new byte[salt.Length + passwordVerifyValue.Length];
+        salt.CopyTo(_header, 0);
+        passwordVerifyValue.CopyTo(_header, salt.Length);
+    }
+
+    internal static WinzipAesEncryptionStream Create(
+        Stream stream,
+        string password,
+        WinzipAesKeySize keySize
+    )
+    {
+        var result = new WinzipAesEncryptionStream(stream, password, keySize);
+        stream.Write(result._header, 0, result._header.Length);
+        return result;
+    }
+
+    internal static async ValueTask<WinzipAesEncryptionStream> CreateAsync(
+        Stream stream,
+        string password,
+        WinzipAesKeySize keySize,
+        CancellationToken cancellationToken
+    )
+    {
+        var result = new WinzipAesEncryptionStream(stream, password, keySize);
+        await stream
+            .WriteAsync(result._header, 0, result._header.Length, cancellationToken)
+            .ConfigureAwait(false);
+        return result;
     }
 
     private static int GetSaltLength(WinzipAesKeySize keySize) =>
@@ -101,7 +137,7 @@ internal class WinzipAesEncryptionStream : Stream
             _ => throw new InvalidOperationException(),
         };
 
-    private static SymmetricAlgorithm CreateCipher(byte[] keyBytes)
+    private static Aes CreateCipher(byte[] keyBytes)
     {
         var cipher = Aes.Create();
         cipher.BlockSize = BLOCK_SIZE_IN_BYTES * 8;
@@ -127,6 +163,9 @@ internal class WinzipAesEncryptionStream : Stream
 
     public override void Flush() => _stream.Flush();
 
+    public override Task FlushAsync(CancellationToken cancellationToken) =>
+        _stream.FlushAsync(cancellationToken);
+
     public override int Read(byte[] buffer, int offset, int count) =>
         throw new NotSupportedException();
 
@@ -146,30 +185,78 @@ internal class WinzipAesEncryptionStream : Stream
         _stream.Write(encrypted, 0, encrypted.Length);
     }
 
+    public override async Task WriteAsync(
+        byte[] buffer,
+        int offset,
+        int count,
+        CancellationToken cancellationToken
+    )
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        if (count == 0)
+        {
+            return;
+        }
+        var encrypted = EncryptData(buffer, offset, count);
+        _hmac.TransformBlock(encrypted, 0, encrypted.Length, encrypted, 0);
+        await _stream
+            .WriteAsync(encrypted, 0, encrypted.Length, cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+#if !LEGACY_DOTNET
+    public override ValueTask WriteAsync(
+        ReadOnlyMemory<byte> buffer,
+        CancellationToken cancellationToken = default
+    )
+    {
+        var bytes = buffer.ToArray();
+        return new ValueTask(WriteAsync(bytes, 0, bytes.Length, cancellationToken));
+    }
+#endif
+
+#if NET48 || NETSTANDARD2_0
+    public async ValueTask DisposeAsync()
+#else
+    public override async ValueTask DisposeAsync()
+#endif
+    {
+        if (_isDisposed)
+        {
+            return;
+        }
+        _isDisposed = true;
+        try
+        {
+            _hmac.TransformFinalBlock([], 0, 0);
+            await _stream.WriteAsync(_hmac.Hash!, 0, AUTH_CODE_LENGTH).ConfigureAwait(false);
+        }
+        finally
+        {
+            _transform.Dispose();
+            _cipher.Dispose();
+            _hmac.Dispose();
+        }
+        GC.SuppressFinalize(this);
+#if !NET48 && !NETSTANDARD2_0
+        await base.DisposeAsync().ConfigureAwait(false);
+#endif
+    }
+
     private byte[] EncryptData(byte[] buffer, int offset, int count)
     {
         var result = new byte[count];
-        var posn = 0;
-
-        while (posn < count)
+        for (var i = 0; i < count; i++)
         {
-            var blockSize = Math.Min(BLOCK_SIZE_IN_BYTES, count - posn);
-
-            // Update counter
-            BinaryPrimitives.WriteInt32LittleEndian(_counter, _nonce++);
-
-            // Encrypt counter to get key stream
-            _transform.TransformBlock(_counter, 0, BLOCK_SIZE_IN_BYTES, _counterOut, 0);
-
-            // XOR with plaintext
-            for (var i = 0; i < blockSize; i++)
+            // Keep unused keystream bytes across writes; compressor chunk sizes are arbitrary.
+            if (_keyStreamOffset == BLOCK_SIZE_IN_BYTES)
             {
-                result[posn + i] = (byte)(_counterOut[i] ^ buffer[offset + posn + i]);
+                BinaryPrimitives.WriteInt32LittleEndian(_counter, _nonce++);
+                _transform.TransformBlock(_counter, 0, BLOCK_SIZE_IN_BYTES, _counterOut, 0);
+                _keyStreamOffset = 0;
             }
-
-            posn += blockSize;
+            result[i] = (byte)(_counterOut[_keyStreamOffset++] ^ buffer[offset + i]);
         }
-
         return result;
     }
 

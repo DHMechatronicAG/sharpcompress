@@ -1,20 +1,26 @@
 # SharpCompress
 
-SharpCompress is a compression library in pure C# for .NET Framework 4.8, .NET 8.0 and .NET 10.0 that can unrar, un7zip, unzip, untar unbzip2, ungzip, unlzip, unzstd, unarc and unarj with forward-only reading and file random access APIs. Write support for zip/tar/bzip2/gzip/lzip are implemented.
+SharpCompress is a compression library in pure C# for .NET Framework 4.8, .NET Standard 2.0/2.1, .NET 6.0, .NET 8.0, and .NET 10.0 that can unrar, un7zip, unzip, untar, unbzip2, ungzip, unlzip, unxz, unzstd, unarc, unarj, unace, and unlzw with forward-only reading and file random access APIs. Write support for zip, tar, bzip2, gzip, lzip, zstandard compression streams, and 7zip archives is implemented.
 
 The major feature is support for non-seekable streams so large files can be processed on the fly (i.e. download stream).
 
-**NEW:** All I/O operations now support async/await for improved performance and scalability. See the [USAGE.md](USAGE.md#async-examples) for examples.
+**NEW:** All I/O operations now support async/await for improved performance and scalability. See the [USAGE.md](docs/USAGE.md#async-examples) for examples.
 
 GitHub Actions Build -
-[![SharpCompress](https://github.com/adamhathcock/sharpcompress/actions/workflows/dotnetcore.yml/badge.svg)](https://github.com/adamhathcock/sharpcompress/actions/workflows/dotnetcore.yml)
+[![SharpCompress](https://github.com/adamhathcock/sharpcompress/actions/workflows/nuget-release.yml/badge.svg)](https://github.com/adamhathcock/sharpcompress/actions/workflows/nuget-release.yml)
 [![Static Badge](https://img.shields.io/badge/API%20Docs-DNDocs-190088?logo=readme&logoColor=white)](https://dndocs.com/d/sharpcompress/api/index.html)
 
 ## Need Help?
 
 Post Issues on Github!
 
-Check the [Supported Formats](FORMATS.md) and [Basic Usage.](USAGE.md)
+ZIP writing supports password protection with WinZip AES-128/AES-256 and PKWARE traditional encryption on seekable output streams. See the [password-protected ZIP example](docs/USAGE.md#write-a-password-protected-zip).
+
+Check the [Supported Formats](docs/FORMATS.md), [API Reference](docs/API.md), and [Basic Usage](docs/USAGE.md).
+
+## Custom Compression Providers
+
+If you need to swap out SharpCompress’s built-in codecs, the `Providers` property (and `WithProviders(...)` extensions) on `ReaderOptions` and `WriterOptions` lets you supply a `CompressionProviderRegistry`. The selected registry is used by Reader/Writer APIs, Archive APIs, and async extraction paths, so the same provider choice is applied consistently across open/read/write flows. The default registry is already wired up, so customization is only necessary when you want to plug in alternatives such as `SystemGZipCompressionProvider` or a third-party `CompressionProvider`. See [docs/USAGE.md#custom-compression-providers](docs/USAGE.md#custom-compression-providers) for guided examples.
 
 ## Recommended Formats
 
@@ -26,7 +32,7 @@ RAR is not recommended as it's a proprietary format and the compression is close
 
 7Zip and XZ both are overly complicated. 7Zip does not support streamable formats. XZ has known holes explained here: (http://www.nongnu.org/lzip/xz_inadequate.html) Use Tar/LZip for LZMA compression instead.
 
-ZStandard is an efficient format that works well for streaming with a flexible compression level to tweak the speed/performance trade off you are looking for.  We currently only implement decompression for ZStandard but as we leverage the [ZstdSharp](https://github.com/oleg-st/ZstdSharp) library one could likely add compression support without much trouble (PRs are welcome!).
+ZStandard is an efficient format that works well for streaming with a flexible compression level to tweak the speed/performance trade off you are looking for.
 
 ## A Simple Request
 
@@ -45,6 +51,8 @@ XZ implementation based on: https://github.com/sambott/XZ.NET by @sambott
 XZ BCJ filters support contributed by Louis-Michel Bergeron, on behalf of aDolus Technology Inc. - 2022
 
 7Zip implementation based on: https://code.google.com/p/managed-lzma/
+
+Zstandard implementation from: https://github.com/oleg-st/ZstdSharp
 
 LICENSE
 Copyright (c) 2000 - 2011 The Legion Of The Bouncy Castle (http://www.bouncycastle.org)

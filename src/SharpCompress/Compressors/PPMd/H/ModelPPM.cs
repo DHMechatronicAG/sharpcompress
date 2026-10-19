@@ -1,25 +1,33 @@
 #nullable disable
 
 using System;
+using System.Buffers;
 using System.IO;
 using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
 using SharpCompress.Compressors.Rar;
 using Decoder = SharpCompress.Compressors.LZMA.RangeCoder.Decoder;
 
 namespace SharpCompress.Compressors.PPMd.H;
 
-internal class ModelPpm
+internal class ModelPpm : IDisposable
 {
+    private const int SEE2_CONTEXT_ROWS = 25;
+    private const int SEE2_CONTEXT_COLUMNS = 16;
+    private const int SEE2_CONTEXT_SIZE = SEE2_CONTEXT_ROWS * SEE2_CONTEXT_COLUMNS;
+    private const int BIN_SUMM_ROWS = 128;
+    private const int BIN_SUMM_COLUMNS = 64;
+    private const int BIN_SUMM_SIZE = BIN_SUMM_ROWS * BIN_SUMM_COLUMNS;
+
     private void InitBlock()
     {
-        for (var i = 0; i < 25; i++)
+        for (var i = 0; i < SEE2_CONTEXT_SIZE; i++)
         {
-            _see2Cont[i] = new See2Context[16];
+            _see2Cont[i] = new See2Context();
         }
-        for (var i2 = 0; i2 < 128; i2++)
-        {
-            _binSumm[i2] = new int[64];
-        }
+
+        _binSumm = ArrayPool<int>.Shared.Rent(BIN_SUMM_SIZE);
     }
 
     public SubAllocator SubAlloc { get; } = new();
@@ -66,8 +74,6 @@ internal class ModelPpm
         set => _hiBitsFlag = value & 0xff;
     }
 
-    public virtual int[][] BinSumm => _binSumm;
-
     internal RangeCoder Coder { get; private set; }
 
     internal State FoundState { get; private set; }
@@ -93,9 +99,9 @@ internal class ModelPpm
 
     public const int MAX_FREQ = 124;
 
-    private readonly See2Context[][] _see2Cont = new See2Context[25][];
+    private readonly See2Context[] _see2Cont = new See2Context[SEE2_CONTEXT_SIZE];
 
-    private See2Context _dummySee2Cont;
+    private readonly See2Context _dummySee2Cont = new();
 
     private PpmContext _minContext; //medContext
 
@@ -110,18 +116,12 @@ internal class ModelPpm
 
     private readonly int[] _charMask = new int[256];
 
-    private readonly int[] _ns2Indx = new int[256];
-
-    private readonly int[] _ns2BsIndx = new int[256];
-
-    private readonly int[] _hb2Flag = new int[256];
-
     // byte EscCount, PrevSuccess, HiBitsFlag;
     private int _escCount,
         _prevSuccess,
         _hiBitsFlag;
 
-    private readonly int[][] _binSumm = new int[128][]; // binary SEE-contexts
+    private int[] _binSumm; // binary SEE-contexts
 
     private static readonly int[] INIT_BIN_ESC =
     {
@@ -134,6 +134,61 @@ internal class ModelPpm
         0x6632,
         0x6051,
     };
+
+    private static readonly int[] NS2_INDX = CreateNs2Indx();
+
+    private static readonly int[] NS2_BS_INDX = CreateNs2BsIndx();
+
+    private static readonly int[] HB2_FLAG = CreateHb2Flag();
+
+    private static int[] CreateNs2Indx()
+    {
+        var result = new int[256];
+        int i,
+            k,
+            m,
+            step;
+        for (i = 0; i < 3; i++)
+        {
+            result[i] = i;
+        }
+        for (m = i, k = 1, step = 1; i < 256; i++)
+        {
+            result[i] = m;
+            if (--k == 0)
+            {
+                k = ++step;
+                m++;
+            }
+        }
+        return result;
+    }
+
+    private static int[] CreateNs2BsIndx()
+    {
+        var result = new int[256];
+        result[0] = 0;
+        result[1] = 2;
+        for (var j = 0; j < 9; j++)
+        {
+            result[2 + j] = 4;
+        }
+        for (var j = 0; j < 256 - 11; j++)
+        {
+            result[11 + j] = 6;
+        }
+        return result;
+    }
+
+    private static int[] CreateHb2Flag()
+    {
+        var result = new int[256];
+        for (var j = 0; j < 0x100 - 0x40; j++)
+        {
+            result[0x40 + j] = 0x08;
+        }
+        return result;
+    }
 
     // Temp fields
     //UPGRADE_NOTE: Final was removed from the declaration of 'tempState1 '. "ms-help://MS.VSCC.v80/dv_commoner/local/redirect.htm?index='!DefaultContextWindowIndex'&keyword='jlca1003'"
@@ -169,6 +224,8 @@ internal class ModelPpm
     //UPGRADE_NOTE: Final was removed from the declaration of 'ps '. "ms-help://MS.VSCC.v80/dv_commoner/local/redirect.htm?index='!DefaultContextWindowIndex'&keyword='jlca1003'"
     private readonly int[] _ps = new int[MAX_O];
 
+    private bool _isDisposed;
+
     public ModelPpm()
     {
         InitBlock();
@@ -176,6 +233,23 @@ internal class ModelPpm
         _maxContext = null;
 
         //medContext = null;
+    }
+
+    public void Dispose()
+    {
+        if (_isDisposed)
+        {
+            return;
+        }
+
+        _isDisposed = true;
+        SubAlloc.StopSubAllocator();
+        var binSumm = _binSumm;
+        if (binSumm is not null)
+        {
+            _binSumm = null;
+            ArrayPool<int>.Shared.Return(binSumm, clearArray: true);
+        }
     }
 
     private void RestartModelRare()
@@ -207,67 +281,30 @@ internal class ModelPpm
             state.SetSuccessor(0);
         }
 
-        for (var i = 0; i < 128; i++)
+        for (var i = 0; i < BIN_SUMM_ROWS; i++)
         {
             for (var k = 0; k < 8; k++)
             {
-                for (var m = 0; m < 64; m += 8)
+                for (var m = 0; m < BIN_SUMM_COLUMNS; m += 8)
                 {
-                    _binSumm[i][k + m] = BIN_SCALE - (INIT_BIN_ESC[k] / (i + 2));
+                    SetBinSumm(i, k + m, BIN_SCALE - (INIT_BIN_ESC[k] / (i + 2)));
                 }
             }
         }
-        for (var i = 0; i < 25; i++)
+        for (var i = 0; i < SEE2_CONTEXT_ROWS; i++)
         {
-            for (var k = 0; k < 16; k++)
+            for (var k = 0; k < SEE2_CONTEXT_COLUMNS; k++)
             {
-                _see2Cont[i][k].Initialize((5 * i) + 10);
+                GetSee2Cont(i, k).Initialize((5 * i) + 10);
             }
         }
     }
 
     private void StartModelRare(int maxOrder)
     {
-        int i,
-            k,
-            m,
-            step;
         _escCount = 1;
         _maxOrder = maxOrder;
         RestartModelRare();
-
-        // Bug Fixed
-        _ns2BsIndx[0] = 0;
-        _ns2BsIndx[1] = 2;
-        for (var j = 0; j < 9; j++)
-        {
-            _ns2BsIndx[2 + j] = 4;
-        }
-        for (var j = 0; j < 256 - 11; j++)
-        {
-            _ns2BsIndx[11 + j] = 6;
-        }
-        for (i = 0; i < 3; i++)
-        {
-            _ns2Indx[i] = i;
-        }
-        for (m = i, k = 1, step = 1; i < 256; i++)
-        {
-            _ns2Indx[i] = m;
-            if ((--k) == 0)
-            {
-                k = ++step;
-                m++;
-            }
-        }
-        for (var j = 0; j < 0x40; j++)
-        {
-            _hb2Flag[j] = 0;
-        }
-        for (var j = 0; j < 0x100 - 0x40; j++)
-        {
-            _hb2Flag[0x40 + j] = 0x08;
-        }
         _dummySee2Cont.Shift = PERIOD_BITS;
     }
 
@@ -279,13 +316,13 @@ internal class ModelPpm
 
     internal bool DecodeInit(IRarUnpack unpackRead, int escChar)
     {
-        var maxOrder = unpackRead.Char & 0xff;
+        var maxOrder = unpackRead.ReadChar() & 0xff;
         var reset = ((maxOrder & 0x20) != 0);
 
         var maxMb = 0;
         if (reset)
         {
-            maxMb = unpackRead.Char;
+            maxMb = unpackRead.ReadChar();
         }
         else
         {
@@ -296,7 +333,7 @@ internal class ModelPpm
         }
         if ((maxOrder & 0x40) != 0)
         {
-            escChar = unpackRead.Char;
+            escChar = unpackRead.ReadChar();
             unpackRead.PpmEscChar = escChar;
         }
         Coder = new RangeCoder(unpackRead);
@@ -318,17 +355,60 @@ internal class ModelPpm
             //medContext = new PPMContext(Heap);
             _maxContext = new PpmContext(Heap);
             FoundState = new State(Heap);
-            _dummySee2Cont = new See2Context();
-            for (var i = 0; i < 25; i++)
-            {
-                for (var j = 0; j < 16; j++)
-                {
-                    _see2Cont[i][j] = new See2Context();
-                }
-            }
             StartModelRare(maxOrder);
         }
         return (_minContext.Address != 0);
+    }
+
+    internal async ValueTask<bool> DecodeInitAsync(
+        IRarUnpack unpackRead,
+        int escChar,
+        CancellationToken cancellationToken = default
+    )
+    {
+        var maxOrder =
+            await unpackRead.ReadCharAsync(cancellationToken).ConfigureAwait(false) & 0xff;
+        var reset = ((maxOrder & 0x20) != 0);
+
+        var maxMb = 0;
+        if (reset)
+        {
+            maxMb = await unpackRead.ReadCharAsync(cancellationToken).ConfigureAwait(false);
+        }
+        else
+        {
+            if (SubAlloc.GetAllocatedMemory() == 0)
+            {
+                return false;
+            }
+        }
+        if ((maxOrder & 0x40) != 0)
+        {
+            escChar = await unpackRead.ReadCharAsync(cancellationToken).ConfigureAwait(false);
+            unpackRead.PpmEscChar = escChar;
+        }
+        Coder = new RangeCoder();
+        await Coder.InitAsync(unpackRead, cancellationToken).ConfigureAwait(false);
+        if (reset)
+        {
+            maxOrder = (maxOrder & 0x1f) + 1;
+            if (maxOrder > 16)
+            {
+                maxOrder = 16 + ((maxOrder - 16) * 3);
+            }
+            if (maxOrder == 1)
+            {
+                SubAlloc.StopSubAllocator();
+                return false;
+            }
+            SubAlloc.StartSubAllocator((maxMb + 1) << 20);
+            _minContext = new PpmContext(Heap);
+
+            _maxContext = new PpmContext(Heap);
+            FoundState = new State(Heap);
+            StartModelRare(maxOrder);
+        }
+        return _minContext.Address != 0;
     }
 
     public virtual int DecodeChar()
@@ -400,17 +480,95 @@ internal class ModelPpm
         return (symbol);
     }
 
-    public virtual See2Context[][] GetSee2Cont() => _see2Cont;
+    public virtual async ValueTask<int> DecodeCharAsync(
+        CancellationToken cancellationToken = default
+    )
+    {
+        // Debug
+        //subAlloc.dumpHeap();
+
+        if (_minContext.Address <= SubAlloc.PText || _minContext.Address > SubAlloc.HeapEnd)
+        {
+            return (-1);
+        }
+
+        if (_minContext.NumStats != 1)
+        {
+            if (
+                _minContext.FreqData.GetStats() <= SubAlloc.PText
+                || _minContext.FreqData.GetStats() > SubAlloc.HeapEnd
+            )
+            {
+                return (-1);
+            }
+            if (!_minContext.DecodeSymbol1(this))
+            {
+                return (-1);
+            }
+        }
+        else
+        {
+            _minContext.DecodeBinSymbol(this);
+        }
+        Coder.Decode();
+        while (FoundState.Address == 0)
+        {
+            await Coder.AriDecNormalizeAsync(cancellationToken).ConfigureAwait(false);
+            do
+            {
+                _orderFall++;
+                _minContext.Address = _minContext.GetSuffix(); // =MinContext->Suffix;
+                if (_minContext.Address <= SubAlloc.PText || _minContext.Address > SubAlloc.HeapEnd)
+                {
+                    return (-1);
+                }
+            } while (_minContext.NumStats == _numMasked);
+            if (!_minContext.DecodeSymbol2(this))
+            {
+                return (-1);
+            }
+            Coder.Decode();
+        }
+        var symbol = FoundState.Symbol;
+        if ((_orderFall == 0) && FoundState.GetSuccessor() > SubAlloc.PText)
+        {
+            // MinContext=MaxContext=FoundState->Successor;
+            var addr = FoundState.GetSuccessor();
+            _minContext.Address = addr;
+            _maxContext.Address = addr;
+        }
+        else
+        {
+            UpdateModel();
+
+            //this.foundState.Address=foundState.Address);//TODO just 4 debugging
+            if (_escCount == 0)
+            {
+                ClearMask();
+            }
+        }
+        await Coder.AriDecNormalizeAsync(cancellationToken).ConfigureAwait(false); // ARI_DEC_NORMALIZE(Coder.code,Coder.low,Coder.range,Coder.UnpackRead);
+        return (symbol);
+    }
+
+    public virtual See2Context GetSee2Cont(int row, int column) =>
+        _see2Cont[(row * SEE2_CONTEXT_COLUMNS) + column];
+
+    public virtual int GetBinSumm(int row, int column) =>
+        _binSumm[(row * BIN_SUMM_COLUMNS) + column];
+
+    public virtual void SetBinSumm(int row, int column, int value) =>
+        _binSumm[(row * BIN_SUMM_COLUMNS) + column] = value;
 
     public virtual void IncEscCount(int dEscCount) => EscCount += dEscCount;
 
     public virtual void IncRunLength(int dRunLength) => RunLength += dRunLength;
 
-    public virtual int[] GetHb2Flag() => _hb2Flag;
+    public virtual int[] GetHb2Flag() => HB2_FLAG;
 
-    public virtual int[] GetNs2BsIndx() => _ns2BsIndx;
+    public virtual int[] GetNs2BsIndx() => NS2_BS_INDX;
 
-    public virtual int[] GetNs2Indx() => _ns2Indx;
+    public virtual int[] GetNs2Indx() => NS2_INDX;
 
     private int CreateSuccessors(bool skip, State p1)
     {
@@ -774,14 +932,35 @@ internal class ModelPpm
         //medContext = new PPMContext(Heap);
         _maxContext = new PpmContext(Heap);
         FoundState = new State(Heap);
-        _dummySee2Cont = new See2Context();
-        for (var i = 0; i < 25; i++)
+        StartModelRare(maxOrder);
+
+        return (_minContext.Address != 0);
+    }
+
+    internal async ValueTask<bool> DecodeInitAsync(
+        Stream stream,
+        int maxOrder,
+        int maxMemory,
+        CancellationToken cancellationToken = default
+    )
+    {
+        if (stream != null)
         {
-            for (var j = 0; j < 16; j++)
-            {
-                _see2Cont[i][j] = new See2Context();
-            }
+            Coder = new RangeCoder();
+            await Coder.InitAsync(stream, cancellationToken).ConfigureAwait(false);
         }
+
+        if (maxOrder == 1)
+        {
+            SubAlloc.StopSubAllocator();
+            return (false);
+        }
+        SubAlloc.StartSubAllocator(maxMemory);
+        _minContext = new PpmContext(Heap);
+
+        //medContext = new PPMContext(Heap);
+        _maxContext = new PpmContext(Heap);
+        FoundState = new State(Heap);
         StartModelRare(maxOrder);
 
         return (_minContext.Address != 0);
@@ -841,7 +1020,7 @@ internal class ModelPpm
             {
                 return -2;
             }
-            _hiBitsFlag = _hb2Flag[FoundState.Symbol];
+            _hiBitsFlag = GetHb2Flag()[FoundState.Symbol];
             decoder.Decode((uint)hiCnt, (uint)(_minContext.FreqData.SummFreq - hiCnt));
             for (i = 0; i < 256; i++)
             {
@@ -862,12 +1041,15 @@ internal class ModelPpm
             _hiBitsFlag = GetHb2Flag()[FoundState.Symbol];
             var off1 = rs.Freq - 1;
             var off2 = _minContext.GetArrayIndex(this, rs);
-            var bs = _binSumm[off1][off2];
+            var bs = GetBinSumm(off1, off2);
             if (decoder.DecodeBit((uint)bs, 14) == 0)
             {
                 byte symbol;
-                _binSumm[off1][off2] =
-                    (bs + INTERVAL - _minContext.GetMean(bs, PERIOD_BITS, 2)) & 0xFFFF;
+                SetBinSumm(
+                    off1,
+                    off2,
+                    (bs + INTERVAL - _minContext.GetMean(bs, PERIOD_BITS, 2)) & 0xFFFF
+                );
                 FoundState.Address = rs.Address;
                 symbol = (byte)rs.Symbol;
                 rs.IncrementFreq((rs.Freq < 128) ? 1 : 0);
@@ -877,7 +1059,7 @@ internal class ModelPpm
                 return symbol;
             }
             bs = (bs - _minContext.GetMean(bs, PERIOD_BITS, 2)) & 0xFFFF;
-            _binSumm[off1][off2] = bs;
+            SetBinSumm(off1, off2, bs);
             _initEsc = PpmContext.EXP_ESCAPE[Utility.URShift(bs, 10)];
             int i;
             for (i = 0; i < 256; i++)
@@ -947,6 +1129,184 @@ internal class ModelPpm
                 return -2;
             }
             decoder.Decode((uint)hiCnt, (uint)(freqSum - hiCnt));
+            see.Summ += freqSum;
+            do
+            {
+                s.Address = _minContext._ps[--i];
+                _charMask[s.Symbol] = 0;
+            } while (i != 0);
+        }
+    }
+
+    public async ValueTask<int> DecodeCharAsync(
+        Decoder decoder,
+        CancellationToken cancellationToken = default
+    )
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+
+        if (_minContext.NumStats != 1)
+        {
+            var s = _tempState1.Initialize(Heap);
+            s.Address = _minContext.FreqData.GetStats();
+            int i;
+            int count,
+                hiCnt;
+            if (
+                (count = (int)decoder.GetThreshold((uint)_minContext.FreqData.SummFreq))
+                < (hiCnt = s.Freq)
+            )
+            {
+                byte symbol;
+                await decoder.DecodeAsync(0, (uint)s.Freq, cancellationToken).ConfigureAwait(false);
+                symbol = (byte)s.Symbol;
+                _minContext.update1_0(this, s.Address);
+                NextContext();
+                return symbol;
+            }
+            _prevSuccess = 0;
+            i = _minContext.NumStats - 1;
+            do
+            {
+                s.IncrementAddress();
+                if ((hiCnt += s.Freq) > count)
+                {
+                    byte symbol;
+                    await decoder
+                        .DecodeAsync((uint)(hiCnt - s.Freq), (uint)s.Freq, cancellationToken)
+                        .ConfigureAwait(false);
+                    symbol = (byte)s.Symbol;
+                    _minContext.Update1(this, s.Address);
+                    NextContext();
+                    return symbol;
+                }
+            } while (--i > 0);
+            if (count >= _minContext.FreqData.SummFreq)
+            {
+                return -2;
+            }
+            _hiBitsFlag = GetHb2Flag()[FoundState.Symbol];
+            await decoder
+                .DecodeAsync(
+                    (uint)hiCnt,
+                    (uint)(_minContext.FreqData.SummFreq - hiCnt),
+                    cancellationToken
+                )
+                .ConfigureAwait(false);
+            for (i = 0; i < 256; i++)
+            {
+                _charMask[i] = -1;
+            }
+            _charMask[s.Symbol] = 0;
+            i = _minContext.NumStats - 1;
+            do
+            {
+                s.DecrementAddress();
+                _charMask[s.Symbol] = 0;
+            } while (--i > 0);
+        }
+        else
+        {
+            var rs = _tempState1.Initialize(Heap);
+            rs.Address = _minContext.GetOneState().Address;
+            _hiBitsFlag = GetHb2Flag()[FoundState.Symbol];
+            var off1 = rs.Freq - 1;
+            var off2 = _minContext.GetArrayIndex(this, rs);
+            var bs = GetBinSumm(off1, off2);
+            if (
+                await decoder.DecodeBitAsync((uint)bs, 14, cancellationToken).ConfigureAwait(false)
+                == 0
+            )
+            {
+                byte symbol;
+                SetBinSumm(
+                    off1,
+                    off2,
+                    (bs + INTERVAL - _minContext.GetMean(bs, PERIOD_BITS, 2)) & 0xFFFF
+                );
+                FoundState.Address = rs.Address;
+                symbol = (byte)rs.Symbol;
+                rs.IncrementFreq((rs.Freq < 128) ? 1 : 0);
+                _prevSuccess = 1;
+                IncRunLength(1);
+                NextContext();
+                return symbol;
+            }
+            bs = (bs - _minContext.GetMean(bs, PERIOD_BITS, 2)) & 0xFFFF;
+            SetBinSumm(off1, off2, bs);
+            _initEsc = PpmContext.EXP_ESCAPE[Utility.URShift(bs, 10)];
+            int i;
+            for (i = 0; i < 256; i++)
+            {
+                _charMask[i] = -1;
+            }
+            _charMask[rs.Symbol] = 0;
+            _prevSuccess = 0;
+        }
+        for (; ; )
+        {
+            var s = _tempState1.Initialize(Heap);
+            int i;
+            int count,
+                hiCnt;
+            See2Context see;
+            int num,
+                numMasked = _minContext.NumStats;
+            do
+            {
+                _orderFall++;
+                _minContext.Address = _minContext.GetSuffix();
+                if (_minContext.Address <= SubAlloc.PText || _minContext.Address > SubAlloc.HeapEnd)
+                {
+                    return -1;
+                }
+            } while (_minContext.NumStats == numMasked);
+            hiCnt = 0;
+            s.Address = _minContext.FreqData.GetStats();
+            i = 0;
+            num = _minContext.NumStats - numMasked;
+            do
+            {
+                var k = _charMask[s.Symbol];
+                hiCnt += s.Freq & k;
+                _minContext._ps[i] = s.Address;
+                s.IncrementAddress();
+                i -= k;
+            } while (i != num);
+
+            see = _minContext.MakeEscFreq(this, numMasked, out var freqSum);
+            freqSum += hiCnt;
+            count = (int)decoder.GetThreshold((uint)freqSum);
+
+            if (count < hiCnt)
+            {
+                byte symbol;
+                var ps = _tempState2.Initialize(Heap);
+                for (
+                    hiCnt = 0, i = 0, ps.Address = _minContext._ps[i];
+                    (hiCnt += ps.Freq) <= count;
+                    i++, ps.Address = _minContext._ps[i]
+                )
+                {
+                    ;
+                }
+                s.Address = ps.Address;
+                await decoder
+                    .DecodeAsync((uint)(hiCnt - s.Freq), (uint)s.Freq, cancellationToken)
+                    .ConfigureAwait(false);
+                see.Update();
+                symbol = (byte)s.Symbol;
+                _minContext.Update2(this, s.Address);
+                UpdateModel();
+                return symbol;
+            }
+            if (count >= freqSum)
+            {
+                return -2;
+            }
+            await decoder
+                .DecodeAsync((uint)hiCnt, (uint)(freqSum - hiCnt), cancellationToken)
+                .ConfigureAwait(false);
             see.Summ += freqSum;
             do
             {

@@ -65,10 +65,9 @@ internal class PkwareTraditionalEncryptionData
     /// <summary>
     /// Generates the 12-byte encryption header required for PKWARE traditional encryption.
     /// </summary>
-    /// <param name="crc">The CRC32 of the uncompressed file data, or the last modified time high byte if using data descriptors.</param>
     /// <param name="lastModifiedTime">The last modified time (used as verification byte when CRC is unknown).</param>
     /// <returns>The encrypted 12-byte header.</returns>
-    public byte[] GenerateEncryptionHeader(uint crc, ushort lastModifiedTime)
+    public byte[] GenerateEncryptionHeader(ushort lastModifiedTime)
     {
         var header = new byte[12];
 
@@ -80,7 +79,7 @@ internal class PkwareTraditionalEncryptionData
 
         // The last byte is the verification byte - high byte of CRC, or high byte of lastModifiedTime
         // When streaming (UsePostDataDescriptor), we use the time as verification
-        header[11] = (byte)((crc >> 24) & 0xff);
+        header[11] = (byte)(lastModifiedTime >> 8);
 
         // Encrypt the header
         return Encrypt(header, header.Length);
@@ -108,10 +107,7 @@ internal class PkwareTraditionalEncryptionData
 
     public byte[] Encrypt(byte[] plainText, int length)
     {
-        if (plainText is null)
-        {
-            throw new ArgumentNullException(nameof(plainText));
-        }
+        ThrowHelper.ThrowIfNull(plainText);
 
         if (length > plainText.Length)
         {

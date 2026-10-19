@@ -1,17 +1,44 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
+using SharpCompress.Common.Options;
 
 namespace SharpCompress.Common.SevenZip;
 
 public class SevenZipEntry : Entry
 {
-    internal SevenZipEntry(SevenZipFilePart filePart) => FilePart = filePart;
+    internal SevenZipEntry(SevenZipFilePart filePart, IReaderOptions readerOptions)
+        : base(readerOptions)
+    {
+        FilePart = filePart;
+    }
 
     internal SevenZipFilePart FilePart { get; }
 
     public override CompressionType CompressionType => FilePart.CompressionType;
 
     public override long Crc => FilePart.Header.Crc ?? 0;
+
+    internal override ChecksumDescriptor Checksum
+    {
+        get
+        {
+            if (
+                IsDirectory
+                || FilePart.Header.IsAnti
+                || !FilePart.Header.HasStream
+                || !FilePart.Header.Crc.HasValue
+            )
+            {
+                return default;
+            }
+
+            return new ChecksumDescriptor(
+                ChecksumKind.Crc32,
+                FilePart.Header.Crc.Value,
+                IsAvailable: true
+            );
+        }
+    }
 
     public override string? Key => FilePart.Header.Name;
 

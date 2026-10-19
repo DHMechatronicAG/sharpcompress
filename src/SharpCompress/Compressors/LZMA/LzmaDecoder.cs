@@ -9,9 +9,17 @@ using SharpCompress.Compressors.LZMA.RangeCoder;
 
 namespace SharpCompress.Compressors.LZMA;
 
-public class Decoder : ICoder, ISetDecoderProperties // ,System.IO.Stream
+public partial class Decoder : ICoder, ISetDecoderProperties, IDisposable
 {
-    private class LenDecoder
+    internal bool HasEndMarker => _rep0 == uint.MaxValue;
+
+    public void Dispose()
+    {
+        _outWindow?.Dispose();
+        _outWindow = null;
+    }
+
+    private partial class LenDecoder
     {
         private BitDecoder _choice = new();
         private BitDecoder _choice2 = new();
@@ -62,19 +70,24 @@ public class Decoder : ICoder, ISetDecoderProperties // ,System.IO.Stream
         }
     }
 
-    private class LiteralDecoder
+    private partial class LiteralDecoder
     {
-        private struct Decoder2
+        private partial struct Decoder2
         {
             private BitDecoder[] _decoders;
+            private int _baseIndex;
 
-            public void Create() => _decoders = new BitDecoder[0x300];
+            public void Create(BitDecoder[] decoders, int baseIndex)
+            {
+                _decoders = decoders;
+                _baseIndex = baseIndex;
+            }
 
             public void Init()
             {
                 for (var i = 0; i < 0x300; i++)
                 {
-                    _decoders[i].Init();
+                    _decoders[_baseIndex + i].Init();
                 }
             }
 
@@ -83,7 +96,7 @@ public class Decoder : ICoder, ISetDecoderProperties // ,System.IO.Stream
                 uint symbol = 1;
                 do
                 {
-                    symbol = (symbol << 1) | _decoders[symbol].Decode(rangeDecoder);
+                    symbol = (symbol << 1) | _decoders[_baseIndex + symbol].Decode(rangeDecoder);
                 } while (symbol < 0x100);
                 return (byte)symbol;
             }
@@ -95,13 +108,15 @@ public class Decoder : ICoder, ISetDecoderProperties // ,System.IO.Stream
                 {
                     var matchBit = (uint)(matchByte >> 7) & 1;
                     matchByte <<= 1;
-                    var bit = _decoders[((1 + matchBit) << 8) + symbol].Decode(rangeDecoder);
+                    var bit = _decoders[_baseIndex + ((1 + matchBit) << 8) + symbol]
+                        .Decode(rangeDecoder);
                     symbol = (symbol << 1) | bit;
                     if (matchBit != bit)
                     {
                         while (symbol < 0x100)
                         {
-                            symbol = (symbol << 1) | _decoders[symbol].Decode(rangeDecoder);
+                            symbol =
+                                (symbol << 1) | _decoders[_baseIndex + symbol].Decode(rangeDecoder);
                         }
                         break;
                     }
@@ -111,6 +126,7 @@ public class Decoder : ICoder, ISetDecoderProperties // ,System.IO.Stream
         }
 
         private Decoder2[] _coders;
+        private BitDecoder[] _models;
         private int _numPrevBits;
         private int _numPosBits;
         private uint _posMask;
@@ -125,10 +141,11 @@ public class Decoder : ICoder, ISetDecoderProperties // ,System.IO.Stream
             _posMask = ((uint)1 << numPosBits) - 1;
             _numPrevBits = numPrevBits;
             var numStates = (uint)1 << (_numPrevBits + _numPosBits);
+            _models = new BitDecoder[checked((int)(numStates * 0x300))];
             _coders = new Decoder2[numStates];
             for (uint i = 0; i < numStates; i++)
             {
-                _coders[i].Create();
+                _coders[i].Create(_models, checked((int)(i * 0x300)));
             }
         }
 
@@ -201,7 +218,7 @@ public class Decoder : ICoder, ISetDecoderProperties // ,System.IO.Stream
         }
     }
 
-#if !NETFRAMEWORK && !NETSTANDARD2_0
+#if !LEGACY_DOTNET
     [MemberNotNull(nameof(_outWindow))]
 #endif
     private void CreateDictionary()
@@ -314,42 +331,12 @@ public class Decoder : ICoder, ISetDecoderProperties // ,System.IO.Stream
         _outWindow = null;
     }
 
-    public async System.Threading.Tasks.Task CodeAsync(
-        Stream inStream,
-        Stream outStream,
-        long inSize,
-        long outSize,
-        ICodeProgress progress,
-        System.Threading.CancellationToken cancellationToken = default
-    )
-    {
-        if (_outWindow is null)
-        {
-            CreateDictionary();
-        }
-        _outWindow.Init(outStream);
-        if (outSize > 0)
-        {
-            _outWindow.SetLimit(outSize);
-        }
-        else
-        {
-            _outWindow.SetLimit(long.MaxValue - _outWindow.Total);
-        }
-
-        var rangeDecoder = new RangeCoder.Decoder();
-        rangeDecoder.Init(inStream);
-
-        await CodeAsync(_dictionarySize, _outWindow, rangeDecoder, cancellationToken)
-            .ConfigureAwait(false);
-
-        await _outWindow.ReleaseStreamAsync(cancellationToken).ConfigureAwait(false);
-        rangeDecoder.ReleaseStream();
-
-        _outWindow.Dispose();
-        _outWindow = null;
-    }
-
+#if !LEGACY_DOTNET
+    // On modern .NET targets, the hot decode loop uses the unsafe flat-array fast path
+    // (see LzmaDecoder.Fast.cs) instead of the per-array, method-call based loop below.
+    internal bool Code(int dictionarySize, OutWindow outWindow, RangeCoder.Decoder rangeDecoder) =>
+        CodeFast(dictionarySize, outWindow, rangeDecoder);
+#else
     internal bool Code(int dictionarySize, OutWindow outWindow, RangeCoder.Decoder rangeDecoder)
     {
         var dictionarySizeCheck = Math.Max(dictionarySize, 1);
@@ -475,145 +462,12 @@ public class Decoder : ICoder, ISetDecoderProperties // ,System.IO.Stream
         }
         return false;
     }
+#endif
 
-    internal async ValueTask<bool> CodeAsync(
-        int dictionarySize,
-        OutWindow outWindow,
-        RangeCoder.Decoder rangeDecoder,
-        System.Threading.CancellationToken cancellationToken = default
-    )
-    {
-        var dictionarySizeCheck = Math.Max(dictionarySize, 1);
+    public void SetDecoderProperties(byte[] properties) =>
+        SetDecoderProperties(properties.AsSpan());
 
-        await outWindow.CopyPendingAsync(cancellationToken).ConfigureAwait(false);
-
-        while (outWindow.HasSpace)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-
-            var posState = (uint)outWindow.Total & _posStateMask;
-            if (
-                _isMatchDecoders[(_state._index << Base.K_NUM_POS_STATES_BITS_MAX) + posState]
-                    .Decode(rangeDecoder) == 0
-            )
-            {
-                byte b;
-                var prevByte = outWindow.GetByte(0);
-                if (!_state.IsCharState())
-                {
-                    b = _literalDecoder.DecodeWithMatchByte(
-                        rangeDecoder,
-                        (uint)outWindow.Total,
-                        prevByte,
-                        outWindow.GetByte((int)_rep0)
-                    );
-                }
-                else
-                {
-                    b = _literalDecoder.DecodeNormal(rangeDecoder, (uint)outWindow.Total, prevByte);
-                }
-                await outWindow.PutByteAsync(b, cancellationToken).ConfigureAwait(false);
-                _state.UpdateChar();
-            }
-            else
-            {
-                uint len;
-                if (_isRepDecoders[_state._index].Decode(rangeDecoder) == 1)
-                {
-                    if (_isRepG0Decoders[_state._index].Decode(rangeDecoder) == 0)
-                    {
-                        if (
-                            _isRep0LongDecoders[
-                                (_state._index << Base.K_NUM_POS_STATES_BITS_MAX) + posState
-                            ]
-                                .Decode(rangeDecoder) == 0
-                        )
-                        {
-                            _state.UpdateShortRep();
-                            await outWindow
-                                .PutByteAsync(outWindow.GetByte((int)_rep0), cancellationToken)
-                                .ConfigureAwait(false);
-                            continue;
-                        }
-                    }
-                    else
-                    {
-                        uint distance;
-                        if (_isRepG1Decoders[_state._index].Decode(rangeDecoder) == 0)
-                        {
-                            distance = _rep1;
-                        }
-                        else
-                        {
-                            if (_isRepG2Decoders[_state._index].Decode(rangeDecoder) == 0)
-                            {
-                                distance = _rep2;
-                            }
-                            else
-                            {
-                                distance = _rep3;
-                                _rep3 = _rep2;
-                            }
-                            _rep2 = _rep1;
-                        }
-                        _rep1 = _rep0;
-                        _rep0 = distance;
-                    }
-                    len = _repLenDecoder.Decode(rangeDecoder, posState) + Base.K_MATCH_MIN_LEN;
-                    _state.UpdateRep();
-                }
-                else
-                {
-                    _rep3 = _rep2;
-                    _rep2 = _rep1;
-                    _rep1 = _rep0;
-                    len = Base.K_MATCH_MIN_LEN + _lenDecoder.Decode(rangeDecoder, posState);
-                    _state.UpdateMatch();
-                    var posSlot = _posSlotDecoder[Base.GetLenToPosState(len)].Decode(rangeDecoder);
-                    if (posSlot >= Base.K_START_POS_MODEL_INDEX)
-                    {
-                        var numDirectBits = (int)((posSlot >> 1) - 1);
-                        _rep0 = ((2 | (posSlot & 1)) << numDirectBits);
-                        if (posSlot < Base.K_END_POS_MODEL_INDEX)
-                        {
-                            _rep0 += BitTreeDecoder.ReverseDecode(
-                                _posDecoders,
-                                _rep0 - posSlot - 1,
-                                rangeDecoder,
-                                numDirectBits
-                            );
-                        }
-                        else
-                        {
-                            _rep0 += (
-                                rangeDecoder.DecodeDirectBits(numDirectBits - Base.K_NUM_ALIGN_BITS)
-                                << Base.K_NUM_ALIGN_BITS
-                            );
-                            _rep0 += _posAlignDecoder.ReverseDecode(rangeDecoder);
-                        }
-                    }
-                    else
-                    {
-                        _rep0 = posSlot;
-                    }
-                }
-                if (_rep0 >= outWindow.Total || _rep0 >= dictionarySizeCheck)
-                {
-                    if (_rep0 == 0xFFFFFFFF)
-                    {
-                        return true;
-                    }
-                    throw new DataErrorException();
-                }
-                await outWindow
-                    .CopyBlockAsync((int)_rep0, (int)len, cancellationToken)
-                    .ConfigureAwait(false);
-            }
-        }
-        return false;
-    }
-
-    public void SetDecoderProperties(byte[] properties)
+    internal void SetDecoderProperties(ReadOnlySpan<byte> properties)
     {
         if (properties.Length < 1)
         {
@@ -630,6 +484,10 @@ public class Decoder : ICoder, ISetDecoderProperties // ,System.IO.Stream
         SetLiteralProperties(lp, lc);
         SetPosBitsProperties(pb);
         Init();
+#if !LEGACY_DOTNET
+        CreateFastModel(lp, lc);
+        InitFastModel();
+#endif
         if (properties.Length >= 5)
         {
             _dictionarySize = 0;

@@ -26,11 +26,11 @@ public class XzBlockAsyncTests : XzTestsBase
     }
 
     [Fact]
-    public async Task OnFindIndexBlockThrowAsync()
+    public async ValueTask OnFindIndexBlockThrowAsync()
     {
         var bytes = new byte[] { 0 };
         using Stream indexBlockStream = new MemoryStream(bytes);
-        var xzBlock = new XZBlock(indexBlockStream, CheckType.CRC64, 8);
+        using var xzBlock = new XZBlock(indexBlockStream, CheckType.CRC64, 8);
         await Assert.ThrowsAsync<XZIndexMarkerReachedException>(async () =>
         {
             await ReadBytesAsync(xzBlock, 1).ConfigureAwait(false);
@@ -38,13 +38,13 @@ public class XzBlockAsyncTests : XzTestsBase
     }
 
     [Fact]
-    public async Task CrcIncorrectThrowsAsync()
+    public async ValueTask CrcIncorrectThrowsAsync()
     {
         var bytes = (byte[])Compressed.Clone();
         bytes[20]++;
         using Stream badCrcStream = new MemoryStream(bytes);
         Rewind(badCrcStream);
-        var xzBlock = new XZBlock(badCrcStream, CheckType.CRC64, 8);
+        using var xzBlock = new XZBlock(badCrcStream, CheckType.CRC64, 8);
         var ex = await Assert.ThrowsAsync<InvalidFormatException>(async () =>
         {
             await ReadBytesAsync(xzBlock, 1).ConfigureAwait(false);
@@ -53,9 +53,9 @@ public class XzBlockAsyncTests : XzTestsBase
     }
 
     [Fact]
-    public async Task CanReadMAsync()
+    public async ValueTask CanReadMAsync()
     {
-        var xzBlock = new XZBlock(CompressedStream, CheckType.CRC64, 8);
+        using var xzBlock = new XZBlock(CompressedStream, CheckType.CRC64, 8);
         Assert.Equal(
             Encoding.ASCII.GetBytes("M"),
             await ReadBytesAsync(xzBlock, 1).ConfigureAwait(false)
@@ -63,9 +63,9 @@ public class XzBlockAsyncTests : XzTestsBase
     }
 
     [Fact]
-    public async Task CanReadMaryAsync()
+    public async ValueTask CanReadMaryAsync()
     {
-        var xzBlock = new XZBlock(CompressedStream, CheckType.CRC64, 8);
+        using var xzBlock = new XZBlock(CompressedStream, CheckType.CRC64, 8);
         Assert.Equal(
             Encoding.ASCII.GetBytes("M"),
             await ReadBytesAsync(xzBlock, 1).ConfigureAwait(false)
@@ -81,35 +81,35 @@ public class XzBlockAsyncTests : XzTestsBase
     }
 
     [Fact]
-    public async Task CanReadPoemWithStreamReaderAsync()
+    public async ValueTask CanReadPoemWithStreamReaderAsync()
     {
-        var xzBlock = new XZBlock(CompressedStream, CheckType.CRC64, 8);
-        var sr = new StreamReader(xzBlock);
-        Assert.Equal(await sr.ReadToEndAsync().ConfigureAwait(false), Original);
+        using var xzBlock = new XZBlock(CompressedStream, CheckType.CRC64, 8);
+        using var sr = new StreamReader(xzBlock);
+        Assert.Equal(Original, await sr.ReadToEndAsync().ConfigureAwait(false));
     }
 
     [Fact]
-    public async Task NoopWhenNoPaddingAsync()
+    public async ValueTask NoopWhenNoPaddingAsync()
     {
         // CompressedStream's only block has no padding.
-        var xzBlock = new XZBlock(CompressedStream, CheckType.CRC64, 8);
-        var sr = new StreamReader(xzBlock);
+        using var xzBlock = new XZBlock(CompressedStream, CheckType.CRC64, 8);
+        using var sr = new StreamReader(xzBlock);
         await sr.ReadToEndAsync().ConfigureAwait(false);
         Assert.Equal(0L, CompressedStream.Position % 4L);
     }
 
     [Fact]
-    public async Task SkipsPaddingWhenPresentAsync()
+    public async ValueTask SkipsPaddingWhenPresentAsync()
     {
-        // CompressedIndexedStream's first block has 1-byte padding.
-        var xzBlock = new XZBlock(CompressedIndexedStream, CheckType.CRC64, 8);
-        var sr = new StreamReader(xzBlock);
+        // CompressedIndexedStream uses CRC32 checks.
+        using var xzBlock = new XZBlock(CompressedIndexedStream, CheckType.CRC32, 4);
+        using var sr = new StreamReader(xzBlock);
         await sr.ReadToEndAsync().ConfigureAwait(false);
         Assert.Equal(0L, CompressedIndexedStream.Position % 4L);
     }
 
     [Fact]
-    public async Task HandlesPaddingInUnalignedBlockAsync()
+    public async ValueTask HandlesPaddingInUnalignedBlockAsync()
     {
         var compressedUnaligned = new byte[Compressed.Length + 1];
         Compressed.CopyTo(compressedUnaligned, 1);
@@ -117,8 +117,8 @@ public class XzBlockAsyncTests : XzTestsBase
         compressedUnalignedStream.Position = 13;
 
         // Compressed's only block has no padding.
-        var xzBlock = new XZBlock(compressedUnalignedStream, CheckType.CRC64, 8);
-        var sr = new StreamReader(xzBlock);
+        using var xzBlock = new XZBlock(compressedUnalignedStream, CheckType.CRC64, 8);
+        using var sr = new StreamReader(xzBlock);
         await sr.ReadToEndAsync().ConfigureAwait(false);
         Assert.Equal(1L, compressedUnalignedStream.Position % 4L);
     }

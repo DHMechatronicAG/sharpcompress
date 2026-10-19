@@ -1,5 +1,4 @@
 using System;
-using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 
@@ -16,22 +15,18 @@ public static unsafe class UnsafeHelper
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static void* malloc(ulong size)
     {
-#if NET6_0_OR_GREATER
+#if NET8_0_OR_GREATER
         var ptr = NativeMemory.Alloc((nuint)size);
 #else
         var ptr = (void*)Marshal.AllocHGlobal((nint)size);
 #endif
-#if DEBUG
-        return PoisonMemory(ptr, size);
-#else
         return ptr;
-#endif
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static void* calloc(ulong num, ulong size)
     {
-#if NET6_0_OR_GREATER
+#if NET8_0_OR_GREATER
         return NativeMemory.AllocZeroed((nuint)num, (nuint)size);
 #else
         var total = num * size;
@@ -53,7 +48,7 @@ public static unsafe class UnsafeHelper
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static void free(void* ptr)
     {
-#if NET6_0_OR_GREATER
+#if NET8_0_OR_GREATER
         NativeMemory.Free(ptr);
 #else
         Marshal.FreeHGlobal((IntPtr)ptr);
@@ -78,17 +73,20 @@ public static unsafe class UnsafeHelper
         var destination = (T*)malloc(size);
 #endif
         fixed (void* source = &array[0])
+        {
             System.Runtime.CompilerServices.Unsafe.CopyBlockUnaligned(destination, source, size);
+        }
 
         return destination;
     }
 
-    [Conditional("DEBUG")]
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static void assert(bool condition, string? message = null)
     {
         if (!condition)
+        {
             throw new ArgumentException(message ?? "assert failed");
+        }
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
